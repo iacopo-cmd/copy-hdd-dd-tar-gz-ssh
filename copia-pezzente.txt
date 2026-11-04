@@ -8,6 +8,7 @@ mkdir -p /root/backup-disco
 cat > /root/backup-disco/copia-pezzente.sh <<'FINE_COPIA_PEZZENTE'
 #!/bin/bash
 set -o pipefail
+PEZZO_MB=1024   # grandezza di ogni pezzo
 [ -z "$TMUX$STY" ] && echo "ATTENZIONE: non sei dentro tmux/screen: se cade la tua connessione la copia si ferma."
 
 read -r -p "IP destinazione: " IP; [ -z "$IP" ] && { echo "IP vuoto"; exit 1; }
@@ -30,11 +31,12 @@ echo "SSH OK: entra da solo con $K"
 
 # 2. quanto e' grande, quanto spazio c'e'
 SIZE=$(blockdev --getsize64 "$DISCO") || exit 1
-PEZZI=$(( (SIZE+1073741823)/1073741824 ))
+PEZZO=$((PEZZO_MB*1048576))
+PEZZI=$(( (SIZE+PEZZO-1)/PEZZO ))
 DIR=/root/backup$N-parti; FINAL=/root/backup$N.img.gz
 LIBERO=$($SSH "mkdir -p $DIR && df -Pk /root | awk 'NR==2 {print \$4}'" </dev/null)
 echo ""
-echo "Disco:        $DISCO, $((SIZE/1073741824)) GB, $PEZZI pezzi da 1 GB"
+echo "Disco:        $DISCO, $((SIZE/1048576)) MB, $PEZZI pezzi da $PEZZO_MB MB"
 echo "Destinazione: $U@$IP:$FINAL"
 echo "Spazio libero la': $((LIBERO/1048576)) GB (serve circa il doppio del disco compresso)"
 read -r -p "Parto? [s/N] " R; [[ "$R" == [sS]* ]] || { echo "Non parto."; exit 0; }
@@ -43,15 +45,34 @@ read -r -p "Parto? [s/N] " R; [[ "$R" == [sS]* ]] || { echo "Non parto."; exit 0
 { date; hostname; echo "DISCO=$DISCO DIMENSIONE_BYTE=$SIZE PEZZI=$PEZZI"; sfdisk -d "$DISCO" 2>&1; } |
     $SSH "cat > /root/backup$N-info.txt"
 
+# misuratore: una riga che si aggiorna (pezzo %, MB, velocita', totale %, tempo che manca)
+misura() {  # $1 pezzo  $2 pezzi  $3 byte del pezzo  $4 byte gia' fatti prima  $5 byte totali  $6 inizio sessione  $7 byte fatti in sessione
+perl -e '
+use Time::HiRes qw(time); $|=1;
+my ($p,$n,$pb,$prima,$tot,$t0,$sess)=@ARGV; my ($b,$buf,$ult)=(0,"",0); my $ti=time;
+sub riga { my $now=time; my $v=($sess+$b)/(($now-$t0)||1);
+  my $resto=$v>0 ? ($tot-$prima-$b)/$v : 0; my $h=int($resto/3600); my $m=int(($resto%3600)/60);
+  printf STDERR "\rpezzo %d/%d %3d%% | %d/%d MB | %.0f MB/s | totale %.1f%% | fine ~%dh%02dm   ",
+    $p,$n,100*$b/($pb||1),$b/1048576,$pb/1048576,$v/1048576,100*($prima+$b)/$tot,$h,$m; }
+while (1) { my $r=sysread(STDIN,$buf,1048576); die "lettura\n" unless defined $r; last if !$r;
+  my $o=0; while ($o<$r) { my $w=syswrite(STDOUT,$buf,$r-$o,$o); die "scrittura\n" unless $w; $o+=$w; }
+  $b+=$r; if (time-$ult>=1) { riga(); $ult=time; } }
+riga(); printf STDERR "\n";
+' "$@"
+}
+
 # 4. copia a pezzi: un pezzo arrivato e verificato non si rifa'; se cade, riprova lo stesso pezzo
+T0=$(date +%s); SESS=0
 for ((P=0; P<PEZZI; P++)); do
     F=$DIR/part-$(printf %06d $P).gz
     if $SSH "gzip -t $F" 2>/dev/null </dev/null; then echo "pezzo $((P+1))/$PEZZI gia' fatto"; continue; fi
     while true; do
-        echo "$(date +%H:%M:%S) pezzo $((P+1))/$PEZZI ..."
-        dd if="$DISCO" bs=4M skip=$((P*256)) count=256 2>/dev/null | gzip -1 |
-            $SSH "cat > $F.tmp && gzip -t $F.tmp && mv -f $F.tmp $F" && break
-        echo "$(date +%H:%M:%S) CADUTO, riprovo il pezzo $((P+1)) tra 15 secondi (Ctrl+C per fermare)"
+        PB=$(( SIZE-P*PEZZO < PEZZO ? SIZE-P*PEZZO : PEZZO ))
+        dd if="$DISCO" bs=1M skip=$((P*PEZZO_MB)) count=$PEZZO_MB 2>/dev/null |
+            misura $((P+1)) $PEZZI $PB $((P*PEZZO)) $SIZE $T0 $SESS | gzip -1 |
+            $SSH "cat > $F.tmp && gzip -t $F.tmp && mv -f $F.tmp $F" &&
+            { SESS=$((SESS+PB)); echo "$(date +%H:%M:%S) pezzo $((P+1))/$PEZZI OK"; break; }
+        echo ""; echo "$(date +%H:%M:%S) CADUTO, riprovo il pezzo $((P+1)) tra 15 secondi (Ctrl+C per fermare)"
         sleep 15
     done
 done
