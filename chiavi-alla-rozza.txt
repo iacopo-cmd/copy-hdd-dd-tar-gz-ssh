@@ -1,13 +1,20 @@
  set +o history
-# ===== chiavi-alla-rozza.txt - 2026-11-04 12:36 - incolla tutto in un terminale bash =====
+# ===== chiavi-alla-rozza.txt - 2026-11-04 12:38 - incolla tutto in un terminale bash =====
 # Crea /root/backup-disco/chiavi.sh e lo lancia: chiave SSH + installazione sulla destinazione.
 # La password della destinazione la chiede una volta sola.
 D=/root/backup-disco; mkdir -p "$D" && chmod 700 "$D"
-cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793792179'
+cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793792323'
 #!/bin/bash
 # Crea una chiave SSH su QUESTA macchina (la sorgente) e la installa sulla destinazione.
 # La password della destinazione la chiede ssh UNA volta sola, poi non serve piu'.
 # Dopo, backup-disco.sh usa la chiave da solo (CHIAVE_SSH=auto in config.txt).
+#
+# PERCHE' LA CHIAVE AUTOMATICA
+# Questo strumento serve quando le cose vanno male: un crash, un disco che cede, un sistema
+# da spostare di corsa. In quei momenti hai fretta, sei agitato e non hai voglia di scrivere:
+# e' li' che sbagli una password, un IP, un comando. Con la chiave scrivi la password UNA volta,
+# poi il backup va da solo per ore, riprova se cade la rete e riparte dopo un riavvio
+# senza chiederti niente. Meno cose da scrivere = meno errori quando conta.
 
 D="$(dirname "$(readlink -f "$0")")"
 CONF="$D/config.txt"
@@ -83,7 +90,9 @@ if [ -f "$CONF" ]; then
 fi
 echo ""
 echo "Fatto. Ora lancia: $D/backup-disco.sh (meglio dentro tmux)"
-FINE_ALLA_ROZZA_1793792179
+FINE_ALLA_ROZZA_1793792323
 chmod 700 "$D/chiavi.sh"
+bash -n "$D/chiavi.sh" && echo "OK: $D/chiavi.sh" || echo "ERRORE: chiavi.sh incollato male, ricopia"
+unset D
  set -o history
 /root/backup-disco/chiavi.sh
