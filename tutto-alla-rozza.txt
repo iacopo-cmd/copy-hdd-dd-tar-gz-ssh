@@ -1,10 +1,10 @@
  set +o history
-# ===== tutto-alla-rozza.txt - 2026-11-04 13:16 - incolla tutto in un terminale bash =====
+# ===== tutto-alla-rozza.txt - 2026-11-04 13:27 - incolla tutto in un terminale bash =====
 # Crea /root/backup-disco con backup-disco.sh, config.txt (senza password) e chiavi.sh.
 # History spenta durante l'incolla, riaccesa alla fine.
 D=/root/backup-disco; mkdir -p "$D" && chmod 700 "$D"
 [ -f "$D/backup-disco.sh" ] && cp -p "$D/backup-disco.sh" "$D/backup-disco.sh.vecchio-$(date +%Y%m%d-%H%M%S)"
-cat > "$D/backup-disco.sh" <<'FINE_ALLA_ROZZA_1793794612'
+cat > "$D/backup-disco.sh" <<'FINE_ALLA_ROZZA_1793795276'
 #!/bin/bash
 # Backup disco a pezzi, riprendibile. Legge tutto da config.txt (accanto allo script).
 # Ogni voce mancante o vuota in config.txt prende il valore di default qui sotto.
@@ -163,13 +163,13 @@ FINAL="$CARTELLA/$NOME.img.gz"
 INFO="$CARTELLA/$NOME-info.txt"
 
 # ACCESSO: CHIAVE oppure PASSWORD
-# CHIAVE_SSH=auto -> usa /root/.ssh/backup-disco_ed25519 o backup-disco_rsa se c'e' (la crea chiavi.sh)
+# CHIAVE_SSH=auto -> usa /root/.ssh/backup-disco_ed25519, _ecdsa o _rsa (in quest'ordine; la crea chiavi.sh)
 # CHIAVE_SSH=/percorso -> usa quella chiave;  CHIAVE_SSH=no -> sempre password
 PASS_FILE="$(dirname "$(readlink -f "$0")")/.password-$NOME"
 CHIAVE_USATA=""
 case "$CHIAVE_SSH" in
     no) ;;
-    auto) for K in /root/.ssh/backup-disco_ed25519 /root/.ssh/backup-disco_rsa; do
+    auto) for K in /root/.ssh/backup-disco_ed25519 /root/.ssh/backup-disco_ecdsa /root/.ssh/backup-disco_rsa; do
               [ -f "$K" ] && { CHIAVE_USATA="$K"; break; }
           done ;;
     *) CHIAVE_USATA="$CHIAVE_SSH" ;;
@@ -633,10 +633,10 @@ else
 fi
 
 unset SSHPASS
-FINE_ALLA_ROZZA_1793794612
+FINE_ALLA_ROZZA_1793795276
 chmod 700 "$D/backup-disco.sh"
 if [ -f "$D/config.txt" ]; then C="$D/config.txt.nuovo"; else C="$D/config.txt"; fi
-cat > "$C" <<'FINE_ALLA_ROZZA_1793794612'
+cat > "$C" <<'FINE_ALLA_ROZZA_1793795276'
 # Configurazione backup disco (una voce per riga: NOME=valore)
 # Se una voce manca o e' vuota vale il default (scritto accanto).
 # Se config.txt manca o ha errori, lo script fa le domande (se lanciato da terminale).
@@ -710,11 +710,11 @@ MISURA_OGNI=5            # default 5  - secondi tra una riga di velocita' e l'al
 # - Ripristino (sul disco di destinazione, ATTENZIONE: lo sovrascrive tutto):
 #   gunzip -c /root/backupN.img.gz | dd of=/dev/DISCO bs=4M status=progress
 #   La tabella partizioni e la conf del disco sono in /root/backupN-info.txt.
-FINE_ALLA_ROZZA_1793794612
+FINE_ALLA_ROZZA_1793795276
 chmod 600 "$C"
 bash -n "$D/backup-disco.sh" && echo "OK: $D/backup-disco.sh" || echo "ERRORE: script incollato male, ricopia"
 [ "$C" != "$D/config.txt" ] && echo "config.txt c'era gia' (non toccato): il nuovo e' in $C"
-cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793794612'
+cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793795276'
 #!/bin/bash
 # Crea una chiave SSH su QUESTA macchina (la sorgente) e la installa sulla destinazione.
 # La password della destinazione la chiede ssh UNA volta sola, poi non serve piu'.
@@ -729,8 +729,10 @@ cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793794612'
 
 D="$(dirname "$(readlink -f "$0")")"
 CONF="$D/config.txt"
-CHIAVE=/root/.ssh/backup-disco_ed25519
-CHIAVE_RSA=/root/.ssh/backup-disco_rsa
+CHIAVE=""
+K_ED=/root/.ssh/backup-disco_ed25519
+K_EC=/root/.ssh/backup-disco_ecdsa
+K_RSA=/root/.ssh/backup-disco_rsa
 
 # valori proposti: da config.txt se c'e'
 leggi() { [ -f "$CONF" ] && sed -nr "s/^$1=([^[:space:]#]*).*/\1/p" "$CONF" | tail -1; }
@@ -746,20 +748,23 @@ read -r -p "Porta [$PORTA]: " R;         [ -n "$R" ] && PORTA="$R"
 read -r -p "Utente [$UTENTE]: " R;       [ -n "$R" ] && UTENTE="$R"
 
 # 1. CHIAVE (senza passphrase: serve per andare da solo)
-# ed25519 se ssh-keygen la sa fare (OpenSSH 6.5+), altrimenti RSA 4096 (sistemi vecchi, es. Debian 7)
+# Ordine: ed25519 (OpenSSH 6.5+), poi ECDSA (va anche con ssh vecchi tipo Debian 7),
+# RSA solo come ultima spiaggia: i server moderni (OpenSSH 8.8+) rifiutano le firme RSA
+# dei client vecchi ("ssh-rsa not in PubkeyAcceptedAlgorithms").
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
-if [ -f "$CHIAVE" ]; then
-    echo "Chiave gia' presente, la riuso: $CHIAVE"
-elif [ -f "$CHIAVE_RSA" ]; then
-    CHIAVE="$CHIAVE_RSA"
-    echo "Chiave gia' presente, la riuso: $CHIAVE"
-elif ssh-keygen -q -t ed25519 -N "" -C "backup-disco@$(hostname)" -f "$CHIAVE" 2>/dev/null; then
-    echo "Chiave creata (ed25519): $CHIAVE"
+COMMENTO="backup-disco@$(hostname)"
+if [ -f "$K_ED" ]; then CHIAVE="$K_ED"; echo "Chiave gia' presente, la riuso: $CHIAVE"
+elif [ -f "$K_EC" ]; then CHIAVE="$K_EC"; echo "Chiave gia' presente, la riuso: $CHIAVE"
+elif ssh-keygen -q -t ed25519 -N "" -C "$COMMENTO" -f "$K_ED" 2>/dev/null; then
+    CHIAVE="$K_ED"; echo "Chiave creata (ed25519): $CHIAVE"
+elif rm -f "$K_ED" "$K_ED.pub"; ssh-keygen -q -t ecdsa -b 521 -N "" -C "$COMMENTO" -f "$K_EC" 2>/dev/null; then
+    CHIAVE="$K_EC"; echo "Chiave creata (ECDSA, questo ssh non conosce ed25519): $CHIAVE"
+elif [ -f "$K_RSA" ]; then
+    rm -f "$K_EC" "$K_EC.pub"; CHIAVE="$K_RSA"; echo "Chiave gia' presente, la riuso: $CHIAVE (RSA: i server nuovi potrebbero rifiutarla)"
 else
-    rm -f "$CHIAVE" "$CHIAVE.pub"
-    CHIAVE="$CHIAVE_RSA"
-    ssh-keygen -q -t rsa -b 4096 -N "" -C "backup-disco@$(hostname)" -f "$CHIAVE" || { echo "ERRORE: chiave non creata"; exit 1; }
-    echo "Chiave creata (RSA 4096, questo ssh non conosce ed25519): $CHIAVE"
+    rm -f "$K_EC" "$K_EC.pub"; CHIAVE="$K_RSA"
+    ssh-keygen -q -t rsa -b 4096 -N "" -C "$COMMENTO" -f "$CHIAVE" || { echo "ERRORE: chiave non creata"; exit 1; }
+    echo "Chiave creata (RSA 4096): $CHIAVE (i server nuovi potrebbero rifiutarla)"
 fi
 PUB=$(cat "$CHIAVE.pub")
 
@@ -805,12 +810,14 @@ fi
 
 # 3. PROVA: deve entrare SENZA password
 echo ""
-if ssh -i "$CHIAVE" -p "$PORTA" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 \
-       "$UTENTE@$IP" "echo OK" >/dev/null 2>&1; then
+if ERR=$(ssh -i "$CHIAVE" -p "$PORTA" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 \
+       "$UTENTE@$IP" "echo OK" 2>&1 </dev/null); then
     echo "PROVA OK: $UTENTE@$IP entra con la chiave, senza password."
 else
-    echo "ATTENZIONE: chiave installata ma la prova senza password fallisce."
-    echo "Sulla destinazione controlla in /etc/ssh/sshd_config: PubkeyAuthentication yes"
+    echo "ATTENZIONE: chiave installata ma la prova senza password fallisce. ssh dice:"
+    echo "$ERR" | tail -5 | sed 's/^/   /'
+    echo "Il motivo preciso e' nel log della destinazione:"
+    echo "   ssh $UTENTE@$IP 'journalctl -u ssh -n 20 --no-pager | grep -i publickey'"
     exit 1
 fi
 
@@ -829,7 +836,7 @@ if [ -f "$CONF" ]; then
 fi
 echo ""
 echo "Fatto. Ora lancia: $D/backup-disco.sh (meglio dentro tmux)"
-FINE_ALLA_ROZZA_1793794612
+FINE_ALLA_ROZZA_1793795276
 chmod 700 "$D/chiavi.sh"
 bash -n "$D/chiavi.sh" && echo "OK: $D/chiavi.sh" || echo "ERRORE: chiavi.sh incollato male, ricopia"
 echo "Ora: 1) $D/chiavi.sh (chiave SSH, password una volta)  2) $D/backup-disco.sh (meglio dentro tmux)"
