@@ -35,6 +35,7 @@ Meno cose da scrivere = meno errori quando conta.
 | `alla-rozza.txt` | Solo il backup: `backup-disco.sh` + `config.txt`. |
 | `chiavi-alla-rozza.txt` | Solo la chiave: crea `chiavi.sh` **e lo lancia subito**. |
 | `key-pezzente.txt` | Solo la chiave, **versione minima**: 40 righe, niente file creati a parte la chiave, si legge a colpo d'occhio. Chiede IP, porta, utente e la password una volta. |
+| `copia-pezzente.txt` | La copia del disco, **versione minima**: controlla che ssh entri da solo con la chiave di `key-pezzente`, mostra grandezza e spazio libero, aspetta il tuo "s", poi copia a pezzi da 1 GB. Se cade riprova, se lo rilanci salta i pezzi fatti. |
 
 Tutti spengono la history della shell durante l'incolla e la riaccendono alla fine.
 Se `config.txt` c'è già **non viene toccato** (il nuovo va in `config.txt.nuovo`).

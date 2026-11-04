@@ -1,0 +1,70 @@
+ set +o history
+# ===== copia-pezzente.txt - copia di un disco intero via ssh, versione minima =====
+# Incolla tutto sulla macchina SORGENTE, da root, MEGLIO DENTRO tmux o screen.
+# Prima serve la chiave: key-pezzente.txt. Questo controlla che ssh entri da solo,
+# poi copia il disco a pezzi da 1 GB compressi. Se cade la rete riprova da solo;
+# se lo rilanci con lo stesso numero salta i pezzi gia' arrivati.
+mkdir -p /root/backup-disco
+cat > /root/backup-disco/copia-pezzente.sh <<'FINE_COPIA_PEZZENTE'
+#!/bin/bash
+set -o pipefail
+[ -z "$TMUX$STY" ] && echo "ATTENZIONE: non sei dentro tmux/screen: se cade la tua connessione la copia si ferma."
+
+read -r -p "IP destinazione: " IP; [ -z "$IP" ] && { echo "IP vuoto"; exit 1; }
+read -r -p "Porta [22]: " PORTA; PORTA=${PORTA:-22}
+read -r -p "Utente [root]: " U; U=${U:-root}
+echo "Dischi:"; lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null | sed 's/^/  /'
+read -r -p "Disco INTERO da copiare (es. /dev/xvda): " DISCO
+[ -b "$DISCO" ] || { echo "$DISCO non e' un disco"; exit 1; }
+read -r -p "Numero del backup [1]: " N; N=${N:-1}
+
+# 1. ssh deve entrare DA SOLO con la chiave di key-pezzente
+K=""; for X in /root/.ssh/backup-disco_ed25519 /root/.ssh/backup-disco_ecdsa /root/.ssh/backup-disco_rsa; do
+    [ -f "$X" ] && { K=$X; break; }; done
+[ -z "$K" ] && { echo "Nessuna chiave: prima incolla key-pezzente.txt"; exit 1; }
+SSH="ssh -i $K -p $PORTA -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=20 $U@$IP"
+if ! ERR=$($SSH true 2>&1 </dev/null); then
+    echo "SSH NON ENTRA DA SOLO. ssh dice:"; echo "$ERR" | tail -3; echo "Rifai key-pezzente.txt"; exit 1
+fi
+echo "SSH OK: entra da solo con $K"
+
+# 2. quanto e' grande, quanto spazio c'e'
+SIZE=$(blockdev --getsize64 "$DISCO") || exit 1
+PEZZI=$(( (SIZE+1073741823)/1073741824 ))
+DIR=/root/backup$N-parti; FINAL=/root/backup$N.img.gz
+LIBERO=$($SSH "mkdir -p $DIR && df -Pk /root | awk 'NR==2 {print \$4}'" </dev/null)
+echo ""
+echo "Disco:        $DISCO, $((SIZE/1073741824)) GB, $PEZZI pezzi da 1 GB"
+echo "Destinazione: $U@$IP:$FINAL"
+echo "Spazio libero la': $((LIBERO/1048576)) GB (serve circa il doppio del disco compresso)"
+read -r -p "Parto? [s/N] " R; [[ "$R" == [sS]* ]] || { echo "Non parto."; exit 0; }
+
+# 3. info del disco (tabella partizioni) accanto al backup
+{ date; hostname; echo "DISCO=$DISCO DIMENSIONE_BYTE=$SIZE PEZZI=$PEZZI"; sfdisk -d "$DISCO" 2>&1; } |
+    $SSH "cat > /root/backup$N-info.txt"
+
+# 4. copia a pezzi: un pezzo arrivato e verificato non si rifa'; se cade, riprova lo stesso pezzo
+for ((P=0; P<PEZZI; P++)); do
+    F=$DIR/part-$(printf %06d $P).gz
+    if $SSH "gzip -t $F" 2>/dev/null </dev/null; then echo "pezzo $((P+1))/$PEZZI gia' fatto"; continue; fi
+    while true; do
+        echo "$(date +%H:%M:%S) pezzo $((P+1))/$PEZZI ..."
+        dd if="$DISCO" bs=4M skip=$((P*256)) count=256 2>/dev/null | gzip -1 |
+            $SSH "cat > $F.tmp && gzip -t $F.tmp && mv -f $F.tmp $F" && break
+        echo "$(date +%H:%M:%S) CADUTO, riprovo il pezzo $((P+1)) tra 15 secondi (Ctrl+C per fermare)"
+        sleep 15
+    done
+done
+
+# 5. ricomposizione
+echo "Ricompongo l'immagine..."
+if $SSH "cat $DIR/part-*.gz > $FINAL.tmp && gzip -t $FINAL.tmp && mv -f $FINAL.tmp $FINAL" </dev/null; then
+    echo "FATTO: $U@$IP:$FINAL"
+    echo "Verificato, puoi cancellare i pezzi: $SSH 'rm -r $DIR'"
+else
+    echo "ERRORE nella ricomposizione (spazio?). I pezzi sono in $DIR: rilancia per riprovare."
+fi
+FINE_COPIA_PEZZENTE
+chmod 700 /root/backup-disco/copia-pezzente.sh
+ set -o history
+/root/backup-disco/copia-pezzente.sh
