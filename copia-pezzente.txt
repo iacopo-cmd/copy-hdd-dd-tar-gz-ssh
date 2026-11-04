@@ -3,7 +3,7 @@
 # Incolla tutto sulla macchina SORGENTE, da root, MEGLIO DENTRO tmux o screen.
 # Prima serve la chiave: key-pezzente.txt. Questo controlla che ssh entri da solo,
 # poi copia il disco a pezzi da 1 GB compressi. Se cade la rete riprova da solo;
-# se lo rilanci con lo stesso numero salta i pezzi gia' arrivati.
+# se lo rilanci con lo stesso nome salta i pezzi gia' arrivati.
 mkdir -p /root/backup-disco
 cat > /root/backup-disco/copia-pezzente.sh <<'FINE_COPIA_PEZZENTE'
 #!/bin/bash
@@ -17,7 +17,10 @@ read -r -p "Utente [root]: " U; U=${U:-root}
 echo "Dischi:"; lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null | sed 's/^/  /'
 read -r -p "Disco INTERO da copiare (es. /dev/xvda): " DISCO
 [ -b "$DISCO" ] || { echo "$DISCO non e' un disco"; exit 1; }
-read -r -p "Numero del backup [1]: " N; N=${N:-1}
+read -r -p "Nome del backup sulla destinazione [backup1]: " NOME; NOME=${NOME:-backup1}
+[[ "$NOME" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Nome: solo lettere, numeri . _ -"; exit 1; }
+read -r -p "Cartella sulla destinazione [/root]: " CART; CART=${CART:-/root}; CART=${CART%/}
+[[ "$CART" == /* && "$CART" != *[[:space:]\'\"]* ]] || { echo "Cartella: deve iniziare con / (niente spazi o apici)"; exit 1; }
 
 # 1. ssh deve entrare DA SOLO con la chiave di key-pezzente
 K=""; for X in /root/.ssh/backup-disco_ed25519 /root/.ssh/backup-disco_ecdsa /root/.ssh/backup-disco_rsa; do
@@ -33,8 +36,8 @@ echo "SSH OK: entra da solo con $K"
 SIZE=$(blockdev --getsize64 "$DISCO") || exit 1
 PEZZO=$((PEZZO_MB*1048576))
 PEZZI=$(( (SIZE+PEZZO-1)/PEZZO ))
-DIR=/root/backup$N-parti; FINAL=/root/backup$N.img.gz
-LIBERO=$($SSH "mkdir -p $DIR && df -Pk /root | awk 'NR==2 {print \$4}'" </dev/null)
+DIR=$CART/$NOME-parti; FINAL=$CART/$NOME.img.gz
+LIBERO=$($SSH "mkdir -p $DIR && df -Pk $CART | awk 'NR==2 {print \$4}'" </dev/null)
 echo ""
 echo "Disco:        $DISCO, $((SIZE/1048576)) MB, $PEZZI pezzi da $PEZZO_MB MB"
 echo "Destinazione: $U@$IP:$FINAL"
@@ -43,7 +46,7 @@ read -r -p "Parto? [s/N] " R; [[ "$R" == [sS]* ]] || { echo "Non parto."; exit 0
 
 # 3. info del disco (tabella partizioni) accanto al backup
 { date; hostname; echo "DISCO=$DISCO DIMENSIONE_BYTE=$SIZE PEZZI=$PEZZI"; sfdisk -d "$DISCO" 2>&1; } |
-    $SSH "cat > /root/backup$N-info.txt"
+    $SSH "cat > $CART/$NOME-info.txt"
 
 # misuratore: una riga che si aggiorna (pezzo %, MB, velocita', totale %, tempo che manca)
 misura() {  # $1 pezzo  $2 pezzi  $3 byte del pezzo  $4 byte gia' fatti prima  $5 byte totali  $6 inizio sessione  $7 byte fatti in sessione
