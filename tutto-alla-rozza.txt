@@ -1,10 +1,10 @@
  set +o history
-# ===== tutto-alla-rozza.txt - 2026-11-04 12:49 - incolla tutto in un terminale bash =====
+# ===== tutto-alla-rozza.txt - 2026-11-04 13:16 - incolla tutto in un terminale bash =====
 # Crea /root/backup-disco con backup-disco.sh, config.txt (senza password) e chiavi.sh.
 # History spenta durante l'incolla, riaccesa alla fine.
 D=/root/backup-disco; mkdir -p "$D" && chmod 700 "$D"
 [ -f "$D/backup-disco.sh" ] && cp -p "$D/backup-disco.sh" "$D/backup-disco.sh.vecchio-$(date +%Y%m%d-%H%M%S)"
-cat > "$D/backup-disco.sh" <<'FINE_ALLA_ROZZA_1793792974'
+cat > "$D/backup-disco.sh" <<'FINE_ALLA_ROZZA_1793794612'
 #!/bin/bash
 # Backup disco a pezzi, riprendibile. Legge tutto da config.txt (accanto allo script).
 # Ogni voce mancante o vuota in config.txt prende il valore di default qui sotto.
@@ -181,10 +181,20 @@ SSH_OPZ="-p $PORTA -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o Ser
 # (come StrictHostKeyChecking=accept-new, ma va anche con OpenSSH vecchi, es. Debian 7-9)
 HOST_ID="$IP"; [ "$PORTA" != 22 ] && HOST_ID="[$IP]:$PORTA"
 host_noto() {
+    # prende le chiavi host che MANCANO, tipo per tipo (rsa, ecdsa, ed25519):
+    # gli ssh-keyscan vecchi senza -t prendono solo rsa, ma ssh vuole ecdsa.
+    # Un tipo gia' noto NON viene toccato: se la chiave e' cambiata, ssh se ne accorge.
+    local T P NOTI AGGIUNTE=""
     mkdir -p /root/.ssh && touch /root/.ssh/known_hosts && chmod 600 /root/.ssh/known_hosts
-    ssh-keygen -F "$HOST_ID" >/dev/null 2>&1 && return 0
-    ssh-keyscan -p "$PORTA" -T 15 "$IP" 2>/dev/null >> /root/.ssh/known_hosts
-    ssh-keygen -F "$HOST_ID" >/dev/null 2>&1 && echo "Chiave host di $HOST_ID salvata in /root/.ssh/known_hosts"
+    NOTI=$(ssh-keygen -F "$HOST_ID" 2>/dev/null | awk '!/^#/ {print $2}')
+    for T in rsa ecdsa ed25519; do
+        case "$T" in rsa) P=ssh-rsa ;; ecdsa) P=ecdsa-sha2 ;; ed25519) P=ssh-ed25519 ;; esac
+        grep -q "^$P" <<< "$NOTI" && continue
+        ssh-keyscan -p "$PORTA" -T 15 -t "$T" "$IP" 2>/dev/null | grep -v '^#' >> /root/.ssh/known_hosts &&
+            AGGIUNTE+="$T "
+    done
+    [ -n "$AGGIUNTE" ] && echo "Chiavi host di $HOST_ID salvate in /root/.ssh/known_hosts: $AGGIUNTE"
+    ssh-keygen -F "$HOST_ID" >/dev/null 2>&1
 }
 host_noto
 
@@ -623,10 +633,10 @@ else
 fi
 
 unset SSHPASS
-FINE_ALLA_ROZZA_1793792974
+FINE_ALLA_ROZZA_1793794612
 chmod 700 "$D/backup-disco.sh"
 if [ -f "$D/config.txt" ]; then C="$D/config.txt.nuovo"; else C="$D/config.txt"; fi
-cat > "$C" <<'FINE_ALLA_ROZZA_1793792974'
+cat > "$C" <<'FINE_ALLA_ROZZA_1793794612'
 # Configurazione backup disco (una voce per riga: NOME=valore)
 # Se una voce manca o e' vuota vale il default (scritto accanto).
 # Se config.txt manca o ha errori, lo script fa le domande (se lanciato da terminale).
@@ -700,11 +710,11 @@ MISURA_OGNI=5            # default 5  - secondi tra una riga di velocita' e l'al
 # - Ripristino (sul disco di destinazione, ATTENZIONE: lo sovrascrive tutto):
 #   gunzip -c /root/backupN.img.gz | dd of=/dev/DISCO bs=4M status=progress
 #   La tabella partizioni e la conf del disco sono in /root/backupN-info.txt.
-FINE_ALLA_ROZZA_1793792974
+FINE_ALLA_ROZZA_1793794612
 chmod 600 "$C"
 bash -n "$D/backup-disco.sh" && echo "OK: $D/backup-disco.sh" || echo "ERRORE: script incollato male, ricopia"
 [ "$C" != "$D/config.txt" ] && echo "config.txt c'era gia' (non toccato): il nuovo e' in $C"
-cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793792974'
+cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793794612'
 #!/bin/bash
 # Crea una chiave SSH su QUESTA macchina (la sorgente) e la installa sulla destinazione.
 # La password della destinazione la chiede ssh UNA volta sola, poi non serve piu'.
@@ -756,12 +766,23 @@ PUB=$(cat "$CHIAVE.pub")
 # CHIAVE HOST della destinazione: la prima volta la prendo con ssh-keyscan
 # (come StrictHostKeyChecking=accept-new, ma va anche con OpenSSH vecchi)
 HOST_ID="$IP"; [ "$PORTA" != 22 ] && HOST_ID="[$IP]:$PORTA"
-touch /root/.ssh/known_hosts && chmod 600 /root/.ssh/known_hosts
-if ! ssh-keygen -F "$HOST_ID" >/dev/null 2>&1; then
-    ssh-keyscan -p "$PORTA" -T 15 "$IP" 2>/dev/null >> /root/.ssh/known_hosts
-    ssh-keygen -F "$HOST_ID" >/dev/null 2>&1 || { echo "ERRORE: $IP porta $PORTA non risponde (ssh-keyscan)"; exit 1; }
-    echo "Chiave host di $HOST_ID salvata in /root/.ssh/known_hosts"
-fi
+host_noto() {
+    # prende le chiavi host che MANCANO, tipo per tipo (rsa, ecdsa, ed25519):
+    # gli ssh-keyscan vecchi senza -t prendono solo rsa, ma ssh vuole ecdsa.
+    # Un tipo gia' noto NON viene toccato: se la chiave e' cambiata, ssh se ne accorge.
+    local T P NOTI AGGIUNTE=""
+    mkdir -p /root/.ssh && touch /root/.ssh/known_hosts && chmod 600 /root/.ssh/known_hosts
+    NOTI=$(ssh-keygen -F "$HOST_ID" 2>/dev/null | awk '!/^#/ {print $2}')
+    for T in rsa ecdsa ed25519; do
+        case "$T" in rsa) P=ssh-rsa ;; ecdsa) P=ecdsa-sha2 ;; ed25519) P=ssh-ed25519 ;; esac
+        grep -q "^$P" <<< "$NOTI" && continue
+        ssh-keyscan -p "$PORTA" -T 15 -t "$T" "$IP" 2>/dev/null | grep -v '^#' >> /root/.ssh/known_hosts &&
+            AGGIUNTE+="$T "
+    done
+    [ -n "$AGGIUNTE" ] && echo "Chiavi host di $HOST_ID salvate in /root/.ssh/known_hosts: $AGGIUNTE"
+    ssh-keygen -F "$HOST_ID" >/dev/null 2>&1
+}
+host_noto || { echo "ERRORE: $IP porta $PORTA non risponde (ssh-keyscan)"; exit 1; }
 
 # 2. INSTALLAZIONE SULLA DESTINAZIONE (qui ssh chiede la password, una volta)
 echo ""
@@ -808,7 +829,7 @@ if [ -f "$CONF" ]; then
 fi
 echo ""
 echo "Fatto. Ora lancia: $D/backup-disco.sh (meglio dentro tmux)"
-FINE_ALLA_ROZZA_1793792974
+FINE_ALLA_ROZZA_1793794612
 chmod 700 "$D/chiavi.sh"
 bash -n "$D/chiavi.sh" && echo "OK: $D/chiavi.sh" || echo "ERRORE: chiavi.sh incollato male, ricopia"
 echo "Ora: 1) $D/chiavi.sh (chiave SSH, password una volta)  2) $D/backup-disco.sh (meglio dentro tmux)"
