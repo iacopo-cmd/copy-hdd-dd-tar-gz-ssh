@@ -1,9 +1,9 @@
  set +o history
-# ===== chiavi-alla-rozza.txt - 2026-11-04 12:38 - incolla tutto in un terminale bash =====
+# ===== chiavi-alla-rozza.txt - 2026-11-04 12:39 - incolla tutto in un terminale bash =====
 # Crea /root/backup-disco/chiavi.sh e lo lancia: chiave SSH + installazione sulla destinazione.
 # La password della destinazione la chiede una volta sola.
 D=/root/backup-disco; mkdir -p "$D" && chmod 700 "$D"
-cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793792323'
+cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793792394'
 #!/bin/bash
 # Crea una chiave SSH su QUESTA macchina (la sorgente) e la installa sulla destinazione.
 # La password della destinazione la chiede ssh UNA volta sola, poi non serve piu'.
@@ -90,7 +90,7 @@ if [ -f "$CONF" ]; then
 fi
 echo ""
 echo "Fatto. Ora lancia: $D/backup-disco.sh (meglio dentro tmux)"
-FINE_ALLA_ROZZA_1793792323
+FINE_ALLA_ROZZA_1793792394
 chmod 700 "$D/chiavi.sh"
 bash -n "$D/chiavi.sh" && echo "OK: $D/chiavi.sh" || echo "ERRORE: chiavi.sh incollato male, ricopia"
 unset D

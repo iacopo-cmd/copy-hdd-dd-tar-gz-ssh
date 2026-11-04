@@ -1,10 +1,10 @@
  set +o history
-# ===== alla-rozza.txt - 2026-11-04 12:38 - incolla tutto in un terminale bash =====
+# ===== alla-rozza.txt - 2026-11-04 12:39 - incolla tutto in un terminale bash =====
 # Crea /root/backup-disco con backup-disco.sh e config.txt (senza password).
 # Per la chiave SSH usa chiavi-alla-rozza.txt (meglio dopo questo).
 D=/root/backup-disco; mkdir -p "$D" && chmod 700 "$D"
 [ -f "$D/backup-disco.sh" ] && cp -p "$D/backup-disco.sh" "$D/backup-disco.sh.vecchio-$(date +%Y%m%d-%H%M%S)"
-cat > "$D/backup-disco.sh" <<'FINE_ALLA_ROZZA_1793792323'
+cat > "$D/backup-disco.sh" <<'FINE_ALLA_ROZZA_1793792394'
 #!/bin/bash
 # Backup disco a pezzi, riprendibile. Legge tutto da config.txt (accanto allo script).
 # Ogni voce mancante o vuota in config.txt prende il valore di default qui sotto.
@@ -211,11 +211,6 @@ else
         read -r -s -p "Password SSH per $UTENTE@$IP: " PASSWORD; echo ""
         [ -z "$PASSWORD" ] && { echo "ERRORE: password vuota!"; exit 1; }
     fi
-
-    SSHPASS="$PASSWORD"
-    export SSHPASS
-    unset PASSWORD
-
 
     SSHPASS="$PASSWORD"
     export SSHPASS
@@ -608,10 +603,10 @@ else
 fi
 
 unset SSHPASS
-FINE_ALLA_ROZZA_1793792323
+FINE_ALLA_ROZZA_1793792394
 chmod 700 "$D/backup-disco.sh"
 if [ -f "$D/config.txt" ]; then C="$D/config.txt.nuovo"; else C="$D/config.txt"; fi
-cat > "$C" <<'FINE_ALLA_ROZZA_1793792323'
+cat > "$C" <<'FINE_ALLA_ROZZA_1793792394'
 # Configurazione backup disco (una voce per riga: NOME=valore)
 # Se una voce manca o e' vuota vale il default (scritto accanto).
 # Se config.txt manca o ha errori, lo script fa le domande (se lanciato da terminale).
@@ -685,7 +680,7 @@ MISURA_OGNI=5            # default 5  - secondi tra una riga di velocita' e l'al
 # - Ripristino (sul disco di destinazione, ATTENZIONE: lo sovrascrive tutto):
 #   gunzip -c /root/backupN.img.gz | dd of=/dev/DISCO bs=4M status=progress
 #   La tabella partizioni e la conf del disco sono in /root/backupN-info.txt.
-FINE_ALLA_ROZZA_1793792323
+FINE_ALLA_ROZZA_1793792394
 chmod 600 "$C"
 bash -n "$D/backup-disco.sh" && echo "OK: $D/backup-disco.sh" || echo "ERRORE: script incollato male, ricopia"
 [ "$C" != "$D/config.txt" ] && echo "config.txt c'era gia' (non toccato): il nuovo e' in $C"
