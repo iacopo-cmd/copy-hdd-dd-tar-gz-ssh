@@ -1,10 +1,10 @@
  set +o history
-# ===== alla-rozza.txt - 2026-11-04 12:20 - incolla tutto in un terminale bash =====
+# ===== alla-rozza.txt - 2026-11-04 12:36 - incolla tutto in un terminale bash =====
 # Crea /root/backup-disco con backup-disco.sh e config.txt (senza password).
-# History spenta durante l'incolla, riaccesa alla fine.
+# Per la chiave SSH usa chiavi-alla-rozza.txt (prima o dopo, non importa).
 D=/root/backup-disco; mkdir -p "$D" && chmod 700 "$D"
 [ -f "$D/backup-disco.sh" ] && cp -p "$D/backup-disco.sh" "$D/backup-disco.sh.vecchio-$(date +%Y%m%d-%H%M%S)"
-cat > "$D/backup-disco.sh" <<'FINE_BURINO_1793791217_6347'
+cat > "$D/backup-disco.sh" <<'FINE_ALLA_ROZZA_1793792179'
 #!/bin/bash
 # Backup disco a pezzi, riprendibile. Legge tutto da config.txt (accanto allo script).
 # Ogni voce mancante o vuota in config.txt prende il valore di default qui sotto.
@@ -33,12 +33,13 @@ ATTESA_RIPROVA=15        # secondi tra un tentativo e l'altro
 MAX_TENTATIVI=0          # tentativi di fila prima di arrendersi (0 = all'infinito)
 TIMEOUT_SSH=20           # secondi per aprire la connessione
 MISURA_OGNI=5            # secondi tra una riga di velocita' e l'altra
+CHIAVE_SSH=auto          # auto = chiave di chiavi.sh se c'e', altrimenti password; no; o percorso
 
 # la password non deve sopravvivere allo script, comunque finisca
 trap 'unset SSHPASS PASSWORD PASS' EXIT
 
 VOCI="DISCO DD_BLOCCO_MB AUTO_BLOCCO CHECK_MB SPLIT_MB COMPRESSORE COMPRESSIONE IP PORTA UTENTE
-CARTELLA NOME_BASE NUMERO ATTESA_RIPROVA MAX_TENTATIVI TIMEOUT_SSH MISURA_OGNI"
+CARTELLA NOME_BASE NUMERO ATTESA_RIPROVA MAX_TENTATIVI TIMEOUT_SSH MISURA_OGNI CHIAVE_SSH"
 # voci chieste sempre quando si fanno le domande (le altre solo se sbagliate)
 VOCI_DOMANDE="DISCO IP PORTA UTENTE CARTELLA NUMERO SPLIT_MB DD_BLOCCO_MB"
 
@@ -95,6 +96,10 @@ controlla() {
     fi
     [[ "$CHECK_MB" =~ ^[0-9]+$ ]] && (( CHECK_MB < 64 )) && echo "CHECK_MB: minimo 64"
     [[ "$COMPRESSIONE" =~ ^[0-9]+$ ]] && (( COMPRESSIONE < 1 || COMPRESSIONE > 9 )) && echo "COMPRESSIONE: da 1 a 9"
+    case "$CHIAVE_SSH" in
+        auto|no) ;;
+        *) [ -f "$CHIAVE_SSH" ] || echo "CHIAVE_SSH: $CHIAVE_SSH non esiste (auto, no o percorso della chiave)" ;;
+    esac
     if [ -n "$PASS" ] && [ -n "$PASSWORD" ] && [ "$PASS" != "$PASSWORD" ]; then
         echo "PASSWORD: PASS e PASSWORD sono diverse, lasciane una sola"
     fi
@@ -157,43 +162,68 @@ DIR="$CARTELLA/$NOME-parti"
 FINAL="$CARTELLA/$NOME.img.gz"
 INFO="$CARTELLA/$NOME-info.txt"
 
-# CONTROLLO SSHPASS
-if ! command -v sshpass >/dev/null 2>&1; then
-    echo "ERRORE: sshpass non installato!"
-    exit 1
-fi
-
-# PASSWORD, in ordine:
-#   1. config.txt (PASSWORD= o PASS=)
-#   2. file salvato .password-<nome> accanto allo script (da una volta precedente)
-#   3. la chiedo ORA, una volta sola, e dopo il primo accesso riuscito la salvo nel file
-# Il file resta anche dopo un riavvio e si cancella SOLO a backup finito.
+# ACCESSO: CHIAVE oppure PASSWORD
+# CHIAVE_SSH=auto -> usa /root/.ssh/backup-disco_ed25519 se c'e' (la crea chiavi.sh)
+# CHIAVE_SSH=/percorso -> usa quella chiave;  CHIAVE_SSH=no -> sempre password
 PASS_FILE="$(dirname "$(readlink -f "$0")")/.password-$NOME"
-PASS_ORIGINE="config"
-[ -z "$PASSWORD" ] && PASSWORD="$PASS"
-unset PASS
-if [ -z "$PASSWORD" ] && [ -s "$PASS_FILE" ]; then
-    PASSWORD=$(cat "$PASS_FILE")
-    PASS_ORIGINE="file"
-    echo "Password presa da $PASS_FILE (salvata la volta scorsa)."
-fi
-if [ -z "$PASSWORD" ]; then
-    PASS_ORIGINE="domanda"
-    if [ ! -t 0 ]; then
-        echo "ERRORE: password vuota in config.txt e nessun terminale per chiederla"
+CHIAVE_USATA=""
+case "$CHIAVE_SSH" in
+    no) ;;
+    auto) [ -f /root/.ssh/backup-disco_ed25519 ] && CHIAVE_USATA=/root/.ssh/backup-disco_ed25519 ;;
+    *) CHIAVE_USATA="$CHIAVE_SSH" ;;
+esac
+
+SSH_OPZ="-p $PORTA -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=$TIMEOUT_SSH"
+
+if [ -n "$CHIAVE_USATA" ]; then
+    PASS_ORIGINE="chiave"
+    unset PASSWORD PASS
+    echo "Accesso con la chiave $CHIAVE_USATA (niente password)."
+    SSH="ssh -i $CHIAVE_USATA -o IdentitiesOnly=yes -o BatchMode=yes $SSH_OPZ"
+else
+    # CONTROLLO SSHPASS
+    if ! command -v sshpass >/dev/null 2>&1; then
+        echo "ERRORE: sshpass non installato! Oppure usa la chiave: lancia chiavi.sh"
         exit 1
     fi
-    echo ""
-    read -r -s -p "Password SSH per $UTENTE@$IP: " PASSWORD; echo ""
-    [ -z "$PASSWORD" ] && { echo "ERRORE: password vuota!"; exit 1; }
+
+    # PASSWORD, in ordine:
+    #   1. config.txt (PASSWORD= o PASS=)
+    #   2. file salvato .password-<nome> accanto allo script (da una volta precedente)
+    #   3. la chiedo ORA, una volta sola, e dopo il primo accesso riuscito la salvo nel file
+    # Il file resta anche dopo un riavvio e si cancella SOLO a backup finito.
+    PASS_FILE="$(dirname "$(readlink -f "$0")")/.password-$NOME"
+    PASS_ORIGINE="config"
+    [ -z "$PASSWORD" ] && PASSWORD="$PASS"
+    unset PASS
+    if [ -z "$PASSWORD" ] && [ -s "$PASS_FILE" ]; then
+        PASSWORD=$(cat "$PASS_FILE")
+        PASS_ORIGINE="file"
+        echo "Password presa da $PASS_FILE (salvata la volta scorsa)."
+    fi
+    if [ -z "$PASSWORD" ]; then
+        PASS_ORIGINE="domanda"
+        if [ ! -t 0 ]; then
+            echo "ERRORE: password vuota in config.txt e nessun terminale per chiederla"
+            exit 1
+        fi
+        echo ""
+        read -r -s -p "Password SSH per $UTENTE@$IP: " PASSWORD; echo ""
+        [ -z "$PASSWORD" ] && { echo "ERRORE: password vuota!"; exit 1; }
+    fi
+
+    SSHPASS="$PASSWORD"
+    export SSHPASS
+    unset PASSWORD
+
+
+    SSHPASS="$PASSWORD"
+    export SSHPASS
+    unset PASSWORD
+
+    # SSH CON PASSWORD AUTOMATICA
+    SSH="sshpass -e ssh -o PreferredAuthentications=password -o NumberOfPasswordPrompts=1 $SSH_OPZ"
 fi
-
-SSHPASS="$PASSWORD"
-export SSHPASS
-unset PASSWORD
-
-# SSH CON PASSWORD AUTOMATICA
-SSH="sshpass -e ssh -p $PORTA -o PreferredAuthentications=password -o NumberOfPasswordPrompts=1 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=$TIMEOUT_SSH"
 
 # ESITO DI UNA CHIAMATA SSH
 # sshpass 5 = password rifiutata -> STOP subito (riprovare farebbe scattare fail2ban)
@@ -211,6 +241,12 @@ caduta() {   # $1 = codice di uscita; ritorna 0 se si deve riprovare
         6) echo "ERRORE: chiave host di $IP da confermare. Mi fermo." >&2
            unset SSHPASS; exit 1 ;;
         255|3|4)
+           # con la chiave, ssh da' 255 anche se la chiave e' rifiutata: controllo e mi fermo
+           if [ "$PASS_ORIGINE" = "chiave" ] &&
+              $SSH "$REMOTE" true 2>&1 </dev/null | grep -q 'Permission denied'; then
+               echo "ERRORE: la destinazione rifiuta la chiave $CHIAVE_USATA. Mi fermo: rilancia chiavi.sh." >&2
+               exit 1
+           fi
            TENTATIVI=$((TENTATIVI+1))
            if (( MAX_TENTATIVI > 0 && TENTATIVI > MAX_TENTATIVI )); then
                echo "ERRORE: superati $MAX_TENTATIVI tentativi. Mi fermo: rilancia per riprendere." >&2
@@ -572,10 +608,10 @@ else
 fi
 
 unset SSHPASS
-FINE_BURINO_1793791217_6347
+FINE_ALLA_ROZZA_1793792179
 chmod 700 "$D/backup-disco.sh"
 if [ -f "$D/config.txt" ]; then C="$D/config.txt.nuovo"; else C="$D/config.txt"; fi
-cat > "$C" <<'FINE_BURINO_1793791217_6347'
+cat > "$C" <<'FINE_ALLA_ROZZA_1793792179'
 # Configurazione backup disco (una voce per riga: NOME=valore)
 # Se una voce manca o e' vuota vale il default (scritto accanto).
 # Se config.txt manca o ha errori, lo script fa le domande (se lanciato da terminale).
@@ -595,7 +631,9 @@ COMPRESSIONE=1           # default 1    - da 1 (veloce) a 9 (stretto)
 IP=0.0.0.0               # 0.0.0.0 = non configurato, lo script non parte
 PORTA=22                 # default 22
 UTENTE=root              # default root
-# Password: si puo' scrivere anche PASS= ; se vuota la chiede (una volta sola).
+# Chiave SSH (consigliata): lancia una volta chiavi.sh e la password non serve piu'.
+CHIAVE_SSH=auto          # default auto - chiave di chiavi.sh se c'e', altrimenti password; no = sempre password; o percorso
+# Password (solo se non c'e' la chiave): si puo' scrivere anche PASS= ; se vuota la chiede (una volta sola).
 # ATTENZIONE: niente commenti sulla riga della password, conta tutto quello dopo l'=.
 PASSWORD=
 CARTELLA=/root           # default /root - dove salvare sulla destinazione
@@ -647,7 +685,7 @@ MISURA_OGNI=5            # default 5  - secondi tra una riga di velocita' e l'al
 # - Ripristino (sul disco di destinazione, ATTENZIONE: lo sovrascrive tutto):
 #   gunzip -c /root/backupN.img.gz | dd of=/dev/DISCO bs=4M status=progress
 #   La tabella partizioni e la conf del disco sono in /root/backupN-info.txt.
-FINE_BURINO_1793791217_6347
+FINE_ALLA_ROZZA_1793792179
 chmod 600 "$C"
 bash -n "$D/backup-disco.sh" && echo "OK: $D/backup-disco.sh" || echo "ERRORE: script incollato male, ricopia"
 [ "$C" != "$D/config.txt" ] && echo "config.txt c'era gia' (non toccato): il nuovo e' in $C"
