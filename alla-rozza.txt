@@ -1,0 +1,656 @@
+ set +o history
+# ===== alla-rozza.txt - 2026-11-04 12:20 - incolla tutto in un terminale bash =====
+# Crea /root/backup-disco con backup-disco.sh e config.txt (senza password).
+# History spenta durante l'incolla, riaccesa alla fine.
+D=/root/backup-disco; mkdir -p "$D" && chmod 700 "$D"
+[ -f "$D/backup-disco.sh" ] && cp -p "$D/backup-disco.sh" "$D/backup-disco.sh.vecchio-$(date +%Y%m%d-%H%M%S)"
+cat > "$D/backup-disco.sh" <<'FINE_BURINO_1793791217_6347'
+#!/bin/bash
+# Backup disco a pezzi, riprendibile. Legge tutto da config.txt (accanto allo script).
+# Ogni voce mancante o vuota in config.txt prende il valore di default qui sotto.
+
+set -o pipefail
+
+CONF="$(dirname "$(readlink -f "$0")")/config.txt"
+
+# ---------------- DEFAULT ----------------
+DISCO=/dev/xvda          # disco sorgente
+DD_BLOCCO_MB=4           # blocco di lettura di dd (MB, minimo 4); usato se il check fallisce
+AUTO_BLOCCO=si           # si = check di velocita' e scelta del blocco migliore; no = usa DD_BLOCCO_MB
+CHECK_MB=256             # MB letti per ogni grandezza provata nel check
+SPLIT_MB=1024            # grandezza di ogni pezzo (MB, multiplo di DD_BLOCCO_MB)
+COMPRESSORE=gzip         # gzip oppure pigz (piu' veloce, usa tutti i core)
+COMPRESSIONE=1           # livello 1 (veloce) .. 9 (stretto)
+IP=0.0.0.0               # 0.0.0.0 = non configurato, non parte
+PORTA=22
+UTENTE=root
+PASSWORD=                # si puo' scrivere anche PASS=
+PASS=
+CARTELLA=/root          # cartella sulla destinazione
+NOME_BASE=backup         # nome file: <NOME_BASE><NUMERO>.img.gz
+NUMERO=0
+ATTESA_RIPROVA=15        # secondi tra un tentativo e l'altro
+MAX_TENTATIVI=0          # tentativi di fila prima di arrendersi (0 = all'infinito)
+TIMEOUT_SSH=20           # secondi per aprire la connessione
+MISURA_OGNI=5            # secondi tra una riga di velocita' e l'altra
+
+# la password non deve sopravvivere allo script, comunque finisca
+trap 'unset SSHPASS PASSWORD PASS' EXIT
+
+VOCI="DISCO DD_BLOCCO_MB AUTO_BLOCCO CHECK_MB SPLIT_MB COMPRESSORE COMPRESSIONE IP PORTA UTENTE
+CARTELLA NOME_BASE NUMERO ATTESA_RIPROVA MAX_TENTATIVI TIMEOUT_SSH MISURA_OGNI"
+# voci chieste sempre quando si fanno le domande (le altre solo se sbagliate)
+VOCI_DOMANDE="DISCO IP PORTA UTENTE CARTELLA NUMERO SPLIT_MB DD_BLOCCO_MB"
+
+# LETTURA CONFIG (NOME=valore, senza eseguire il file; vuoto = default)
+CONF_PROBLEMA=""
+if [ ! -f "$CONF" ]; then
+    CONF_PROBLEMA="manca $CONF"
+else
+    while IFS= read -r RIGA || [ -n "$RIGA" ]; do
+        RIGA="${RIGA%$'\r'}"
+        case "$RIGA" in ''|'#'*) continue ;; esac
+        if [[ "$RIGA" != *=* ]]; then
+            echo "ATTENZIONE: riga senza '=' in config.txt: $RIGA"
+            CONF_PROBLEMA="config.txt rotto"
+            continue
+        fi
+        CHIAVE="${RIGA%%=*}"
+        VALORE="${RIGA#*=}"
+        # toglie commento in riga (" # ...") e spazi in fondo; la password resta intera
+        if [ "$CHIAVE" != "PASSWORD" ] && [ "$CHIAVE" != "PASS" ]; then
+            VALORE=$(sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' <<< "$VALORE")
+        fi
+        [ -z "$VALORE" ] && continue
+        case " $VOCI PASSWORD PASS " in
+            *[[:space:]]"$CHIAVE"[[:space:]]*) printf -v "$CHIAVE" '%s' "$VALORE" ;;
+            *) echo "ATTENZIONE: voce sconosciuta in config.txt: $CHIAVE (ignorata)" ;;
+        esac
+    done < "$CONF"
+fi
+
+# CONTROLLI: scrive un errore per riga ("VOCE: messaggio"), non esce
+controlla() {
+    local V
+    for V in DD_BLOCCO_MB CHECK_MB SPLIT_MB COMPRESSIONE PORTA NUMERO ATTESA_RIPROVA MAX_TENTATIVI TIMEOUT_SSH MISURA_OGNI; do
+        [[ "${!V}" =~ ^[0-9]+$ ]] || echo "$V: deve essere un numero (ora: '${!V}')"
+    done
+    [ -b "$DISCO" ] || echo "DISCO: $DISCO non e' un disco"
+    [ "$IP" = "0.0.0.0" ] && echo "IP: non impostato (ora: 0.0.0.0)"
+    [ -z "$IP" ] && echo "IP: vuoto"
+    [ -z "$UTENTE" ] && echo "UTENTE: vuoto"
+    case "$AUTO_BLOCCO" in si|no) ;; *) echo "AUTO_BLOCCO: si o no (ora: '$AUTO_BLOCCO')" ;; esac
+    case "$COMPRESSORE" in
+        gzip|pigz) command -v "$COMPRESSORE" >/dev/null 2>&1 || echo "COMPRESSORE: $COMPRESSORE non installato" ;;
+        *) echo "COMPRESSORE: gzip o pigz (ora: '$COMPRESSORE')" ;;
+    esac
+    [[ "$NOME_BASE" =~ ^[A-Za-z0-9._-]+$ ]] || echo "NOME_BASE: solo lettere, numeri . _ -"
+    [[ "$CARTELLA" == /* && "$CARTELLA" != *"'"* ]] || echo "CARTELLA: deve iniziare con / (niente apici)"
+    if [[ "$DD_BLOCCO_MB" =~ ^[0-9]+$ ]]; then
+        (( DD_BLOCCO_MB >= 4 )) || echo "DD_BLOCCO_MB: minimo 4 (ora: $DD_BLOCCO_MB)"
+        if [[ "$SPLIT_MB" =~ ^[0-9]+$ ]] && (( DD_BLOCCO_MB > 0 )); then
+            (( SPLIT_MB >= DD_BLOCCO_MB && SPLIT_MB % DD_BLOCCO_MB == 0 )) ||
+                echo "SPLIT_MB: deve essere multiplo di DD_BLOCCO_MB ($SPLIT_MB / $DD_BLOCCO_MB)"
+        fi
+    fi
+    [[ "$CHECK_MB" =~ ^[0-9]+$ ]] && (( CHECK_MB < 64 )) && echo "CHECK_MB: minimo 64"
+    [[ "$COMPRESSIONE" =~ ^[0-9]+$ ]] && (( COMPRESSIONE < 1 || COMPRESSIONE > 9 )) && echo "COMPRESSIONE: da 1 a 9"
+    if [ -n "$PASS" ] && [ -n "$PASSWORD" ] && [ "$PASS" != "$PASSWORD" ]; then
+        echo "PASSWORD: PASS e PASSWORD sono diverse, lasciane una sola"
+    fi
+    return 0
+}
+
+ERRORI=$(controlla)
+
+if [ -n "$CONF_PROBLEMA" ] || [ -n "$ERRORI" ]; then
+    [ -n "$CONF_PROBLEMA" ] && echo "PROBLEMA: $CONF_PROBLEMA"
+    [ -n "$ERRORI" ] && sed 's/^/ERRORE: /' <<< "$ERRORI"
+
+    if [ ! -t 0 ]; then
+        echo "Nessun terminale per le domande: sistema config.txt e rilancia."
+        exit 1
+    fi
+
+    # PASS/PASSWORD in conflitto: si scarta e si chiede alla fine
+    if grep -q '^PASSWORD:' <<< "$ERRORI"; then PASSWORD=""; PASS=""; fi
+
+    echo ""
+    echo "Ti faccio le domande. INVIO = tengo il valore tra [ ]."
+    echo "Dischi presenti:"
+    lsblk -dpno NAME,SIZE,TYPE,MODEL 2>/dev/null | sed 's/^/  /'
+    while true; do
+        DA_CHIEDERE="$VOCI_DOMANDE $(cut -d: -f1 <<< "$ERRORI" | grep -v '^PASSWORD$' | tr '\n' ' ')"
+        GIA=" "
+        for V in $DA_CHIEDERE; do
+            [[ "$GIA" == *" $V "* ]] && continue
+            GIA+="$V "
+            read -r -p "  $V [${!V}]: " R || exit 1
+            [ -n "$R" ] && printf -v "$V" '%s' "$R"
+        done
+        ERRORI=$(controlla | grep -v '^PASSWORD:')
+        [ -z "$ERRORI" ] && break
+        echo ""
+        sed 's/^/ERRORE: /' <<< "$ERRORI"
+        echo "Ripeto le domande."
+    done
+
+    read -r -p "Salvo queste risposte in config.txt (SENZA password)? [s/N]: " R
+    if [[ "$R" =~ ^[sS] ]]; then
+        [ -f "$CONF" ] && cp -p "$CONF" "$CONF.vecchio-$(date +%Y%m%d-%H%M%S)"
+        {
+            echo "# config.txt scritto dalle domande il $(date '+%Y-%m-%d %H:%M')"
+            echo "# Voce mancante o vuota = default. Password: PASSWORD= o PASS= (se vuota la chiede)"
+            for V in $VOCI; do echo "$V=${!V}"; done
+            echo "PASSWORD="
+        } > "$CONF.tmp" && chmod 600 "$CONF.tmp" && mv -f "$CONF.tmp" "$CONF" &&
+            echo "Salvato $CONF (il vecchio, se c'era, e' in config.txt.vecchio-*)"
+    fi
+fi
+
+CARTELLA="${CARTELLA%/}"
+
+DISK="$DISCO"
+REMOTE="$UTENTE@$IP"
+NOME="$NOME_BASE$NUMERO"
+DIR="$CARTELLA/$NOME-parti"
+FINAL="$CARTELLA/$NOME.img.gz"
+INFO="$CARTELLA/$NOME-info.txt"
+
+# CONTROLLO SSHPASS
+if ! command -v sshpass >/dev/null 2>&1; then
+    echo "ERRORE: sshpass non installato!"
+    exit 1
+fi
+
+# PASSWORD, in ordine:
+#   1. config.txt (PASSWORD= o PASS=)
+#   2. file salvato .password-<nome> accanto allo script (da una volta precedente)
+#   3. la chiedo ORA, una volta sola, e dopo il primo accesso riuscito la salvo nel file
+# Il file resta anche dopo un riavvio e si cancella SOLO a backup finito.
+PASS_FILE="$(dirname "$(readlink -f "$0")")/.password-$NOME"
+PASS_ORIGINE="config"
+[ -z "$PASSWORD" ] && PASSWORD="$PASS"
+unset PASS
+if [ -z "$PASSWORD" ] && [ -s "$PASS_FILE" ]; then
+    PASSWORD=$(cat "$PASS_FILE")
+    PASS_ORIGINE="file"
+    echo "Password presa da $PASS_FILE (salvata la volta scorsa)."
+fi
+if [ -z "$PASSWORD" ]; then
+    PASS_ORIGINE="domanda"
+    if [ ! -t 0 ]; then
+        echo "ERRORE: password vuota in config.txt e nessun terminale per chiederla"
+        exit 1
+    fi
+    echo ""
+    read -r -s -p "Password SSH per $UTENTE@$IP: " PASSWORD; echo ""
+    [ -z "$PASSWORD" ] && { echo "ERRORE: password vuota!"; exit 1; }
+fi
+
+SSHPASS="$PASSWORD"
+export SSHPASS
+unset PASSWORD
+
+# SSH CON PASSWORD AUTOMATICA
+SSH="sshpass -e ssh -p $PORTA -o PreferredAuthentications=password -o NumberOfPasswordPrompts=1 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=$TIMEOUT_SSH"
+
+# ESITO DI UNA CHIAMATA SSH
+# sshpass 5 = password rifiutata -> STOP subito (riprovare farebbe scattare fail2ban)
+# sshpass 6 = chiave host da confermare -> STOP
+# ssh 255 / sshpass 3,4 = connessione caduta o impossibile -> si riprova
+TENTATIVI=0
+caduta() {   # $1 = codice di uscita; ritorna 0 se si deve riprovare
+    case "$1" in
+        5) echo "ERRORE: password rifiutata da $REMOTE. Mi fermo (niente retry, rischio ban)." >&2
+           if [ "$PASS_ORIGINE" = "file" ]; then
+               rm -f "$PASS_FILE"
+               echo "Cancellata la password salvata: al prossimo avvio la richiedo." >&2
+           fi
+           unset SSHPASS; exit 1 ;;
+        6) echo "ERRORE: chiave host di $IP da confermare. Mi fermo." >&2
+           unset SSHPASS; exit 1 ;;
+        255|3|4)
+           TENTATIVI=$((TENTATIVI+1))
+           if (( MAX_TENTATIVI > 0 && TENTATIVI > MAX_TENTATIVI )); then
+               echo "ERRORE: superati $MAX_TENTATIVI tentativi. Mi fermo: rilancia per riprendere." >&2
+               unset SSHPASS; exit 1
+           fi
+           echo "$(date '+%H:%M:%S') CONNESSIONE CADUTA (codice $1), tentativo $TENTATIVI: riprovo tra $ATTESA_RIPROVA s..." >&2
+           sleep "$ATTESA_RIPROVA"
+           return 0 ;;
+    esac
+    return 1
+}
+
+# SSH CHE RIPROVA DA SOLO SE CADE LA CONNESSIONE (la password la rimanda sshpass)
+# rssh "comando" [dati da mandare su stdin]
+rssh() {
+    local RC
+    while true; do
+        if [ $# -ge 2 ]; then
+            printf '%s\n' "$2" | $SSH "$REMOTE" "$1"; RC=$?
+        else
+            $SSH "$REMOTE" "$1" </dev/null; RC=$?
+        fi
+        caduta "$RC" && continue
+        TENTATIVI=0
+        return "$RC"
+    done
+}
+
+# CONTROLLO CONNESSIONE
+echo "Verifico password e connessione SSH verso $REMOTE (porta $PORTA)..."
+
+if ! rssh "echo OK"; then
+    echo "ERRORE: la destinazione risponde ma il comando di prova e' fallito!"
+    unset SSHPASS
+    exit 1
+fi
+
+echo "Autenticazione riuscita!"
+
+# password scritta a mano: la salvo, cosi' dopo un riavvio non la richiedo
+if [ "$PASS_ORIGINE" = "domanda" ]; then
+    ( umask 077; printf '%s' "$SSHPASS" > "$PASS_FILE.tmp" && mv -f "$PASS_FILE.tmp" "$PASS_FILE" ) &&
+        echo "Password salvata in $PASS_FILE (si cancella a backup finito)." ||
+        echo "ATTENZIONE: non riesco a salvare la password: dopo un riavvio la richiedo."
+fi
+
+# Misuratore del flusso dati
+meter() {
+perl -e '
+use Time::HiRes qw(time);
+
+my ($label,$total,$ogni)=@ARGV;
+my $start=time;
+my $last=$start;
+my $bytes=0;
+my $buf;
+$|=1;
+
+while (1) {
+    my $r=sysread(STDIN,$buf,1048576);
+    die "Errore lettura\n" unless defined $r;
+    last if $r==0;
+
+    my $off=0;
+    while ($off<$r) {
+        my $w=syswrite(STDOUT,$buf,$r-$off,$off);
+        die "Errore scrittura\n" unless defined $w && $w>0;
+        $off+=$w;
+    }
+
+    $bytes+=$r;
+    my $now=time;
+
+    if ($now-$last>=$ogni) {
+        my $speed=$bytes/1048576/($now-$start);
+
+        if ($total>0) {
+            printf STDERR
+            "[%s] %.1f / %.1f MiB (%.1f%%) - %.2f MiB/s\n",
+            $label,$bytes/1048576,$total/1048576,
+            100*$bytes/$total,$speed;
+        } else {
+            printf STDERR
+            "[%s] %.1f MiB prodotti - %.2f MiB/s\n",
+            $label,$bytes/1048576,$speed;
+        }
+
+        $last=$now;
+    }
+}
+
+my $elapsed=time-$start;
+my $speed=$elapsed>0 ? $bytes/1048576/$elapsed : 0;
+
+printf STDERR
+"[%s] COMPLETATO: %.1f MiB in %.1f secondi - %.2f MiB/s\n",
+$label,$bytes/1048576,$elapsed,$speed;
+' "$1" "$2" "$MISURA_OGNI"
+}
+
+# DIMENSIONE DISCO
+SIZE=$(blockdev --getsize64 "$DISK") || exit 1
+
+# ---------------- CHECK DEL BLOCCO DI LETTURA ----------------
+# Prova piu' grandezze di blocco leggendo CHECK_MB per ognuna (solo lettura, senza cache)
+# e prende la piu' veloce. Il valore del config vince se l'altra non e' almeno il 5% meglio.
+# Se il check fallisce si usa DD_BLOCCO_MB del config.
+SCELTA_BLOCCO="config (AUTO_BLOCCO=no)"
+CHECK_TXT=""
+
+check_blocco() {
+    local DEV NOMEDEV TIPO="disco" OPT EXT C I OFF CNT T0 T1 MS VEL
+    local DIRECT="iflag=direct" CAND=() OKC=() OKV=() VEL_CONF=0 MIGLIORE=0 VEL_MIGL=0
+    DEV=$(readlink -f "$DISK")
+    NOMEDEV=$(basename "$DEV")
+
+    CAND=(4 8 16 "$DD_BLOCCO_MB")
+
+    # device-mapper (LVM, LUKS...): blocchi piu' grandi
+    if [ -d "/sys/class/block/$NOMEDEV/dm" ]; then
+        TIPO="device-mapper"
+        CAND+=(32 64)
+        if command -v lvs >/dev/null 2>&1 &&
+           EXT=$(lvs --noheadings --nosuffix --units m -o vg_extent_size "$DISK" 2>/dev/null); then
+            EXT=$(tr -d ' ' <<< "$EXT"); EXT=${EXT%%.*}
+            if [[ "$EXT" =~ ^[0-9]+$ ]] && (( EXT > 0 )); then
+                TIPO="LVM (extent $EXT MB)"; CAND+=("$EXT")
+            fi
+        fi
+    fi
+
+    # grandezza suggerita dal disco (byte)
+    OPT=$(cat "/sys/class/block/$NOMEDEV/queue/optimal_io_size" 2>/dev/null)
+    if [[ "$OPT" =~ ^[0-9]+$ ]] && (( OPT >= 4194304 && OPT % 1048576 == 0 )); then
+        CAND+=($((OPT/1048576)))
+    fi
+
+    # tieni solo: >= 4, divide SPLIT_MB, <= CHECK_MB; senza doppioni
+    mapfile -t CAND < <(for C in "${CAND[@]}"; do
+        (( C >= 4 && SPLIT_MB % C == 0 && C <= CHECK_MB )) && echo "$C"; done | sort -n | uniq)
+
+    echo "Check blocco su $DISK ($TIPO): provo ${CAND[*]} MB, $CHECK_MB MB ciascuno..."
+    (( ${#CAND[@]} == 0 )) && return 1
+    (( SIZE < CHECK_MB*1048576 )) && { echo "  disco piu' piccolo di CHECK_MB"; return 1; }
+
+    # lettura diretta (senza cache) se il disco la supporta
+    dd if="$DISK" of=/dev/null bs=4M count=1 $DIRECT status=none 2>/dev/null || {
+        DIRECT=""; echo "  (lettura diretta non supportata: uso zone diverse del disco)"; }
+
+    I=0
+    for C in "${CAND[@]}"; do
+        # zona diversa per ogni prova, cosi' la cache non falsa i numeri
+        OFF=$(( I*CHECK_MB ))
+        (( (OFF+CHECK_MB)*1048576 > SIZE )) && OFF=0
+        CNT=$(( CHECK_MB/C ))
+        T0=$(date +%s%N)
+        if dd if="$DISK" of=/dev/null bs="${C}M" skip=$((OFF/C)) count="$CNT" $DIRECT status=none 2>/dev/null; then
+            T1=$(date +%s%N)
+            MS=$(( (T1-T0)/1000000 )); (( MS < 1 )) && MS=1
+            VEL=$(( CNT*C*1000/MS ))
+            printf "  %3d MB -> %5d MB/s\n" "$C" "$VEL"
+            CHECK_TXT+="CHECK_${C}MB=${VEL} MB/s"$'\n'
+            OKC+=("$C"); OKV+=("$VEL")
+            (( C == DD_BLOCCO_MB )) && VEL_CONF=$VEL
+            (( VEL > VEL_MIGL )) && { VEL_MIGL=$VEL; MIGLIORE=$C; }
+        else
+            echo "  $C MB -> errore di lettura, scartato"
+        fi
+        I=$((I+1))
+    done
+
+    (( ${#OKC[@]} == 0 )) && return 1
+
+    if (( VEL_CONF > 0 && MIGLIORE != DD_BLOCCO_MB && VEL_MIGL*100 < VEL_CONF*105 )); then
+        SCELTA_BLOCCO="config ($DD_BLOCCO_MB MB: $MIGLIORE MB solo ${VEL_MIGL} vs ${VEL_CONF} MB/s, meno del 5% meglio)"
+    elif (( MIGLIORE == DD_BLOCCO_MB )); then
+        SCELTA_BLOCCO="check (il config $DD_BLOCCO_MB MB e' il piu' veloce)"
+    else
+        SCELTA_BLOCCO="check ($MIGLIORE MB a ${VEL_MIGL} MB/s, il config $DD_BLOCCO_MB MB faceva ${VEL_CONF} MB/s)"
+        DD_BLOCCO_MB=$MIGLIORE
+    fi
+    return 0
+}
+
+if [ "$AUTO_BLOCCO" = "si" ]; then
+    if ! check_blocco; then
+        SCELTA_BLOCCO="config ($DD_BLOCCO_MB MB: check fallito)"
+        echo "Check fallito: uso il blocco del config, $DD_BLOCCO_MB MB."
+    fi
+fi
+echo "Blocco di lettura: $DD_BLOCCO_MB MB, scelta: $SCELTA_BLOCCO"
+
+BS=$((DD_BLOCCO_MB*1048576))
+CHUNK=$((SPLIT_MB/DD_BLOCCO_MB))
+
+TOTAL=$(( (SIZE+BS-1)/BS ))
+BLOCKS=$(( (TOTAL+CHUNK-1)/CHUNK ))
+
+echo "======================================"
+echo "      BACKUP DISCO RESUMABLE"
+echo "======================================"
+echo "Backup: $NOME"
+echo "Disco: $DISK"
+echo "Dimensione: $((SIZE/1073741824)) GB"
+echo "Pezzi: $BLOCKS da $SPLIT_MB MB (dd a blocchi da $DD_BLOCCO_MB MB)"
+echo "Compressione: $COMPRESSORE -$COMPRESSIONE"
+echo "Destinazione: $REMOTE:$FINAL"
+echo "======================================"
+
+# PREPARAZIONE DESTINAZIONE
+rssh "mkdir -p '$DIR'" || { echo "ERRORE: non riesco a creare $DIR"; exit 1; }
+
+# CONF DISCO E PEZZI (scritta solo al primo avvio di questo backup)
+if rssh "test -f '$INFO'"; then
+    VECCHIO=$(rssh "grep '^SPLIT_MB=' '$INFO'" | cut -d= -f2)
+    if [ "$VECCHIO" != "$SPLIT_MB" ]; then
+        echo "ERRORE: $NOME era partito con SPLIT_MB=$VECCHIO, ora e' $SPLIT_MB."
+        echo "Rimetti $VECCHIO o cambia NUMERO in config.txt."
+        exit 1
+    fi
+    echo "Conf disco gia' salvata in $INFO (ripresa)."
+    # il blocco di lettura puo' cambiare in ripresa: i pezzi restano uguali. Lo annoto.
+    rssh "cat >> '$INFO'" "RIPRESA=$(date '+%Y-%m-%d %H:%M:%S') DD_BLOCCO_MB=$DD_BLOCCO_MB ($SCELTA_BLOCCO)" ||
+        echo "ATTENZIONE: non riesco ad annotare la ripresa in $INFO"
+else
+    INFO_TXT=$({
+        echo "NOME=$NOME"
+        echo "DATA=$(date '+%Y-%m-%d %H:%M:%S %Z')"
+        echo "ORIGINE=$(hostname)"
+        echo "DISCO=$DISK"
+        echo "DIMENSIONE_BYTE=$SIZE"
+        echo "SETTORE_LOGICO=$(blockdev --getss "$DISK")"
+        echo "SETTORE_FISICO=$(blockdev --getpbsz "$DISK")"
+        echo "DD_BLOCCO_MB=$DD_BLOCCO_MB"
+        echo "SCELTA_BLOCCO=$SCELTA_BLOCCO"
+        printf '%s' "$CHECK_TXT"
+        echo "SPLIT_MB=$SPLIT_MB"
+        echo "PEZZI=$BLOCKS"
+        echo "COMPRESSORE=$COMPRESSORE -$COMPRESSIONE"
+        echo ""
+        echo "# lsblk"
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINT "$DISK" 2>&1
+        echo ""
+        echo "# tabella partizioni (sfdisk -d)"
+        sfdisk -d "$DISK" 2>&1
+        echo ""
+        echo "# blkid"
+        blkid "$DISK"* 2>&1
+    })
+    rssh "cat > '$INFO.tmp' && mv -f '$INFO.tmp' '$INFO'" "$INFO_TXT" || {
+        echo "ERRORE: non riesco a scrivere $INFO"; exit 1; }
+    echo "Conf disco salvata in $INFO"
+fi
+
+# CICLO PEZZI
+for ((N=0; N<BLOCKS; N++))
+do
+    START=$((N*CHUNK))
+    COUNT=$CHUNK
+
+    if (( START+COUNT>TOTAL )); then
+        COUNT=$((TOTAL-START))
+    fi
+
+    PART=$(printf "%06d" "$N")
+    FILE="$DIR/part-$PART.gz"
+    TMP="$DIR/part-$PART.tmp"
+
+    BYTES=$((SIZE-START*BS))
+    MAX=$((COUNT*BS))
+
+    if (( BYTES>MAX )); then
+        BYTES=$MAX
+    fi
+
+    echo ""
+    echo "======================================"
+    echo " PEZZO $((N+1)) / $BLOCKS"
+    echo "======================================"
+
+    # SALTA PEZZI GIA' VERIFICATI
+    if rssh "test -f '$FILE' && gzip -t '$FILE' >/dev/null 2>&1"
+    then
+        echo "Gia' presente e verificato: salto."
+        continue
+    fi
+
+    # TRASFERIMENTO CON RITENTATIVI
+    while true
+    do
+        echo ""
+        echo "LETTURA DISCO E COMPRESSIONE IN CORSO..."
+
+        dd if="$DISK" bs="$BS" \
+            skip="$START" count="$COUNT" 2>/dev/null |
+
+            meter "LETTURA DD" "$BYTES" |
+
+            "$COMPRESSORE" -"$COMPRESSIONE" |
+
+            meter "OUTPUT $COMPRESSORE" 0 |
+
+            $SSH "$REMOTE" \
+            "rm -f '$TMP'; cat > '$TMP' &&
+             gzip -t '$TMP' &&
+             mv -f '$TMP' '$FILE'"
+        ST=("${PIPESTATUS[@]}")
+
+        if (( ST[0]==0 && ST[1]==0 && ST[2]==0 && ST[3]==0 && ST[4]==0 )); then
+            echo ""
+            echo "PEZZO $((N+1)) COMPLETATO E VERIFICATO!"
+            TENTATIVI=0
+            break
+        fi
+
+        echo ""
+        # password rifiutata -> stop; connessione caduta -> attesa e retry
+        # (se cade ssh, dd/gzip muoiono di riflesso: conta l'errore di ssh)
+        if caduta "${ST[4]}"; then
+            continue
+        fi
+
+        # altro errore (lettura disco, compressione, verifica sulla destinazione)
+        TENTATIVI=$((TENTATIVI+1))
+        echo "ERRORE NEL PEZZO $((N+1)) (dd=${ST[0]} compressore=${ST[2]} ssh/verifica=${ST[4]}), tentativo $TENTATIVI"
+        (( ST[0] != 0 && ST[0] != 141 )) && echo "  -> errore di LETTURA DEL DISCO: se si ripete, il disco sorgente ha problemi."
+        if (( MAX_TENTATIVI > 0 && TENTATIVI > MAX_TENTATIVI )); then
+            echo "ERRORE: superati $MAX_TENTATIVI tentativi. Mi fermo: rilancia per riprendere."
+            unset SSHPASS; exit 1
+        fi
+        echo "Riprovo lo stesso pezzo tra $ATTESA_RIPROVA secondi..."
+        sleep "$ATTESA_RIPROVA"
+    done
+
+done
+
+# RICOMPOSIZIONE
+echo ""
+echo "TUTTI I PEZZI TRASFERITI!"
+echo "RICOMPOSIZIONE IMMAGINE DISCO..."
+
+if rssh "cat '$DIR'/part-*.gz > '$FINAL.tmp' &&
+ gzip -t '$FINAL.tmp' && mv -f '$FINAL.tmp' '$FINAL'"
+then
+    echo ""
+    echo "======================================"
+    echo "       BACKUP COMPLETATO!"
+    echo "======================================"
+    echo "File: $FINAL"
+    echo "Conf: $INFO"
+    # backup finito tutto: ora la password salvata si leva
+    if [ -f "$PASS_FILE" ]; then
+        rm -f "$PASS_FILE" && echo "Password salvata cancellata ($PASS_FILE)."
+    fi
+else
+    echo "ERRORE NELLA RICOMPOSIZIONE!"
+    unset SSHPASS
+    exit 1
+fi
+
+unset SSHPASS
+FINE_BURINO_1793791217_6347
+chmod 700 "$D/backup-disco.sh"
+if [ -f "$D/config.txt" ]; then C="$D/config.txt.nuovo"; else C="$D/config.txt"; fi
+cat > "$C" <<'FINE_BURINO_1793791217_6347'
+# Configurazione backup disco (una voce per riga: NOME=valore)
+# Se una voce manca o e' vuota vale il default (scritto accanto).
+# Se config.txt manca o ha errori, lo script fa le domande (se lanciato da terminale).
+
+# --- Sorgente ---
+DISCO=/dev/xvda          # default /dev/xvda
+DD_BLOCCO_MB=4           # default 4    - blocco di lettura di dd, in MB (minimo 4); usato se il check fallisce
+AUTO_BLOCCO=si           # default si   - check di velocita' prima di partire e scelta del blocco migliore
+CHECK_MB=256             # default 256  - MB letti per ogni grandezza provata nel check (minimo 64)
+SPLIT_MB=1024            # default 1024 - grandezza di ogni pezzo, in MB (multiplo di DD_BLOCCO_MB)
+
+# --- Compressione ---
+COMPRESSORE=gzip         # default gzip - oppure pigz (usa tutti i core)
+COMPRESSIONE=1           # default 1    - da 1 (veloce) a 9 (stretto)
+
+# --- Destinazione ---
+IP=0.0.0.0               # 0.0.0.0 = non configurato, lo script non parte
+PORTA=22                 # default 22
+UTENTE=root              # default root
+# Password: si puo' scrivere anche PASS= ; se vuota la chiede (una volta sola).
+# ATTENZIONE: niente commenti sulla riga della password, conta tutto quello dopo l'=.
+PASSWORD=
+CARTELLA=/root           # default /root - dove salvare sulla destinazione
+
+# --- Nome del backup ---
+# Crea: CARTELLA/<NOME_BASE><NUMERO>.img.gz, ...-parti/, ...-info.txt
+NOME_BASE=backup         # default backup
+NUMERO=0                 # default 0 - lo incrementi tu per ogni backup nuovo
+
+# --- Tempi ---
+ATTESA_RIPROVA=15        # default 15 - secondi prima di riprovare dopo una caduta
+MAX_TENTATIVI=0          # default 0  - tentativi di fila prima di arrendersi (0 = all'infinito)
+TIMEOUT_SSH=20           # default 20 - secondi per aprire la connessione
+MISURA_OGNI=5            # default 5  - secondi tra una riga di velocita' e l'altra
+
+# ---------------- SE CADE LA CONNESSIONE ----------------
+# Ogni chiamata SSH riprova da sola, la password la rimanda sshpass in automatico.
+# Il pezzo interrotto riparte da capo; quelli gia' arrivati non si rifanno.
+# Password RIFIUTATA: lo script si ferma subito, non insiste (fail2ban ti bannerebbe).
+# Password scritta a mano: dopo il primo accesso riuscito viene salvata in .password-<nome>
+#   accanto allo script (chmod 600), cosi' dopo un riavvio non la richiede.
+#   Si cancella da sola SOLO a backup completato (o se la destinazione la rifiuta).
+
+# ---------------- CHECK DEL BLOCCO ----------------
+# Prima di partire prova 4, 8, 16 MB (+32, 64 e extent su LVM) e il valore del config,
+# leggendo CHECK_MB per ognuno senza cache. Vince il piu' veloce; il config resta se
+# l'altro non e' almeno il 5% meglio. Se il check fallisce, si usa DD_BLOCCO_MB.
+# Il blocco puo' cambiare anche in ripresa: i pezzi restano uguali (conta solo SPLIT_MB).
+
+# ---------------- CONSIGLI ----------------
+# - Lancia lo script dentro tmux/screen: se cade la tua connessione il backup continua.
+# - Se si interrompe, rilancialo con lo STESSO NUMERO: salta i pezzi gia' arrivati.
+#   Per un backup nuovo incrementa NUMERO, altrimenti mescoli pezzi vecchi e nuovi.
+# - Non cambiare SPLIT_MB a meta' backup (lo script se ne accorge e si ferma).
+#   DD_BLOCCO_MB, compressore e livello invece si possono cambiare anche in ripresa.
+# - DD_BLOCCO_MB tra 1 e 16 va bene quasi sempre; oltre non guadagni.
+# - pigz al posto di gzip: stessa compressione, molto piu' veloce. Il file resta un .gz normale.
+# - Copia coerente: ferma il database (o meglio avvia da un sistema live) prima di partire.
+#   Un disco copiato acceso, con il DB che scrive, puo' non ripartire.
+# - Spazio sulla destinazione: serve circa il DOPPIO del compresso (pezzi + file finale).
+#   A backup verificato puoi cancellare CARTELLA/<nome>-parti/.
+# - Comprime meglio se prima riempi di zeri lo spazio libero sulla sorgente.
+# - Prima volta verso un IP nuovo: la chiave host viene accettata da sola.
+#   Se la destinazione e' stata reinstallata, togli la vecchia con: ssh-keygen -R IP
+# - Questo file contiene la password: tienilo chmod 600 e non copiarlo in giro.
+#   Meglio ancora: un utente dedicato sulla destinazione invece di root.
+# - gzip -t verifica solo che il file sia integro, non che sia uguale al disco.
+#   Un ripristino di prova ogni tanto e' l'unica verifica vera.
+# - Ripristino (sul disco di destinazione, ATTENZIONE: lo sovrascrive tutto):
+#   gunzip -c /root/backupN.img.gz | dd of=/dev/DISCO bs=4M status=progress
+#   La tabella partizioni e la conf del disco sono in /root/backupN-info.txt.
+FINE_BURINO_1793791217_6347
+chmod 600 "$C"
+bash -n "$D/backup-disco.sh" && echo "OK: $D/backup-disco.sh" || echo "ERRORE: script incollato male, ricopia"
+[ "$C" != "$D/config.txt" ] && echo "config.txt c'era gia' (non toccato): il nuovo e' in $C"
+echo "Ora: nano $C  poi  $D/backup-disco.sh (meglio dentro tmux)"
+unset D C
+ set -o history
