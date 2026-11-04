@@ -1,0 +1,45 @@
+ set +o history
+# ===== key-pezzente.txt - chiave SSH in 30 secondi, versione minima =====
+# Incolla tutto sulla macchina SORGENTE, da root. Chiede IP, porta, utente,
+# poi la password della destinazione UNA volta. Va anche con ssh vecchi (Debian 7).
+# Chiave: /root/.ssh/backup-disco_ed25519 o _ecdsa (backup-disco.sh la trova da solo).
+key_pezzente() {
+    local IP PORTA UTENTE K T P ERR H
+    read -r -p "IP destinazione: " IP; [ -z "$IP" ] && { echo "IP vuoto"; return 1; }
+    read -r -p "Porta [22]: " PORTA; PORTA=${PORTA:-22}
+    read -r -p "Utente [root]: " UTENTE; UTENTE=${UTENTE:-root}
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh && touch /root/.ssh/known_hosts
+
+    # 1. chiave: ed25519, se questo ssh non la conosce ECDSA (mai RSA: i server nuovi la rifiutano)
+    K=/root/.ssh/backup-disco_ed25519
+    if [ ! -f $K ] && ! ssh-keygen -q -t ed25519 -N "" -C "backup-disco@$(hostname)" -f $K 2>/dev/null; then
+        rm -f $K $K.pub; K=/root/.ssh/backup-disco_ecdsa
+        [ -f $K ] || ssh-keygen -q -t ecdsa -b 521 -N "" -C "backup-disco@$(hostname)" -f $K || { echo "chiave non creata"; return 1; }
+    fi
+    echo "Chiave: $K"
+
+    # 2. chiavi host della destinazione: solo i tipi che mancano (un tipo gia' noto non si tocca)
+    H=$IP; [ "$PORTA" != 22 ] && H="[$IP]:$PORTA"
+    for T in rsa ecdsa ed25519; do
+        case $T in rsa) P=ssh-rsa;; ecdsa) P=ecdsa-sha2;; ed25519) P=ssh-ed25519;; esac
+        ssh-keygen -F "$H" 2>/dev/null | awk '{print $2}' | grep -q "^$P" ||
+            ssh-keyscan -p "$PORTA" -t $T "$IP" 2>/dev/null | grep -v '^#' >> /root/.ssh/known_hosts
+    done
+
+    # 3. installo la chiave (qui chiede la password)
+    echo "Password di $UTENTE@$IP:"
+    ssh -p "$PORTA" -o PubkeyAuthentication=no "$UTENTE@$IP" \
+        "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qxF '$(cat $K.pub)' ~/.ssh/authorized_keys || echo '$(cat $K.pub)' >> ~/.ssh/authorized_keys" ||
+        { echo "NON INSTALLATA (password sbagliata o la destinazione non accetta password)"; return 1; }
+
+    # 4. prova senza password
+    if ERR=$(ssh -i $K -p "$PORTA" -o IdentitiesOnly=yes -o BatchMode=yes "$UTENTE@$IP" true 2>&1 </dev/null); then
+        echo "PROVA OK: $UTENTE@$IP entra con la chiave, senza password."
+    else
+        echo "PROVA FALLITA. ssh dice:"; echo "$ERR" | tail -3
+        echo "Il motivo vero: ssh $UTENTE@$IP 'journalctl -u ssh -n 20 --no-pager | grep -i publickey'"
+        return 1
+    fi
+}
+ set -o history
+key_pezzente; unset -f key_pezzente

@@ -34,6 +34,7 @@ Meno cose da scrivere = meno errori quando conta.
 | `tutto-alla-rozza.txt` | **Tutto insieme**: crea `backup-disco.sh`, `config.txt` e `chiavi.sh` in `/root/backup-disco`. Non lancia niente. |
 | `alla-rozza.txt` | Solo il backup: `backup-disco.sh` + `config.txt`. |
 | `chiavi-alla-rozza.txt` | Solo la chiave: crea `chiavi.sh` **e lo lancia subito**. |
+| `key-pezzente.txt` | Solo la chiave, **versione minima**: 40 righe, niente file creati a parte la chiave, si legge a colpo d'occhio. Chiede IP, porta, utente e la password una volta. |
 
 Tutti spengono la history della shell durante l'incolla e la riaccendono alla fine.
 Se `config.txt` c'è già **non viene toccato** (il nuovo va in `config.txt.nuovo`).
