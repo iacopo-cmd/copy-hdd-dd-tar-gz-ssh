@@ -1,9 +1,9 @@
  set +o history
-# ===== chiavi-alla-rozza.txt - 2026-11-04 12:39 - incolla tutto in un terminale bash =====
+# ===== chiavi-alla-rozza.txt - 2026-11-04 12:49 - incolla tutto in un terminale bash =====
 # Crea /root/backup-disco/chiavi.sh e lo lancia: chiave SSH + installazione sulla destinazione.
 # La password della destinazione la chiede una volta sola.
 D=/root/backup-disco; mkdir -p "$D" && chmod 700 "$D"
-cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793792394'
+cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793792974'
 #!/bin/bash
 # Crea una chiave SSH su QUESTA macchina (la sorgente) e la installa sulla destinazione.
 # La password della destinazione la chiede ssh UNA volta sola, poi non serve piu'.
@@ -19,9 +19,10 @@ cat > "$D/chiavi.sh" <<'FINE_ALLA_ROZZA_1793792394'
 D="$(dirname "$(readlink -f "$0")")"
 CONF="$D/config.txt"
 CHIAVE=/root/.ssh/backup-disco_ed25519
+CHIAVE_RSA=/root/.ssh/backup-disco_rsa
 
 # valori proposti: da config.txt se c'e'
-leggi() { [ -f "$CONF" ] && sed -nE "s/^$1=([^[:space:]#]*).*/\1/p" "$CONF" | tail -1; }
+leggi() { [ -f "$CONF" ] && sed -nr "s/^$1=([^[:space:]#]*).*/\1/p" "$CONF" | tail -1; }
 IP=$(leggi IP); PORTA=$(leggi PORTA); UTENTE=$(leggi UTENTE)
 [ "$IP" = "0.0.0.0" ] && IP=""
 [ -z "$PORTA" ] && PORTA=22
@@ -33,22 +34,38 @@ read -r -p "IP destinazione [$IP]: " R;  [ -n "$R" ] && IP="$R"
 read -r -p "Porta [$PORTA]: " R;         [ -n "$R" ] && PORTA="$R"
 read -r -p "Utente [$UTENTE]: " R;       [ -n "$R" ] && UTENTE="$R"
 
-command -v ssh-keygen >/dev/null 2>&1 || { echo "ERRORE: manca ssh-keygen (apt install openssh-client)"; exit 1; }
-
 # 1. CHIAVE (senza passphrase: serve per andare da solo)
+# ed25519 se ssh-keygen la sa fare (OpenSSH 6.5+), altrimenti RSA 4096 (sistemi vecchi, es. Debian 7)
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 if [ -f "$CHIAVE" ]; then
     echo "Chiave gia' presente, la riuso: $CHIAVE"
+elif [ -f "$CHIAVE_RSA" ]; then
+    CHIAVE="$CHIAVE_RSA"
+    echo "Chiave gia' presente, la riuso: $CHIAVE"
+elif ssh-keygen -q -t ed25519 -N "" -C "backup-disco@$(hostname)" -f "$CHIAVE" 2>/dev/null; then
+    echo "Chiave creata (ed25519): $CHIAVE"
 else
-    ssh-keygen -q -t ed25519 -N "" -C "backup-disco@$(hostname)" -f "$CHIAVE" || { echo "ERRORE: chiave non creata"; exit 1; }
-    echo "Chiave creata: $CHIAVE"
+    rm -f "$CHIAVE" "$CHIAVE.pub"
+    CHIAVE="$CHIAVE_RSA"
+    ssh-keygen -q -t rsa -b 4096 -N "" -C "backup-disco@$(hostname)" -f "$CHIAVE" || { echo "ERRORE: chiave non creata"; exit 1; }
+    echo "Chiave creata (RSA 4096, questo ssh non conosce ed25519): $CHIAVE"
 fi
 PUB=$(cat "$CHIAVE.pub")
+
+# CHIAVE HOST della destinazione: la prima volta la prendo con ssh-keyscan
+# (come StrictHostKeyChecking=accept-new, ma va anche con OpenSSH vecchi)
+HOST_ID="$IP"; [ "$PORTA" != 22 ] && HOST_ID="[$IP]:$PORTA"
+touch /root/.ssh/known_hosts && chmod 600 /root/.ssh/known_hosts
+if ! ssh-keygen -F "$HOST_ID" >/dev/null 2>&1; then
+    ssh-keyscan -p "$PORTA" -T 15 "$IP" 2>/dev/null >> /root/.ssh/known_hosts
+    ssh-keygen -F "$HOST_ID" >/dev/null 2>&1 || { echo "ERRORE: $IP porta $PORTA non risponde (ssh-keyscan)"; exit 1; }
+    echo "Chiave host di $HOST_ID salvata in /root/.ssh/known_hosts"
+fi
 
 # 2. INSTALLAZIONE SULLA DESTINAZIONE (qui ssh chiede la password, una volta)
 echo ""
 echo "Ora scrivi la password di $UTENTE@$IP (una volta sola):"
-if ! ssh -p "$PORTA" -o StrictHostKeyChecking=accept-new -o PubkeyAuthentication=no \
+if ! ssh -p "$PORTA" -o StrictHostKeyChecking=yes -o PubkeyAuthentication=no \
         -o PreferredAuthentications=password,keyboard-interactive -o NumberOfPasswordPrompts=2 \
         "$UTENTE@$IP" "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys &&
         { grep -qxF '$PUB' ~/.ssh/authorized_keys || echo '$PUB' >> ~/.ssh/authorized_keys; } &&
@@ -81,7 +98,7 @@ if [ -f "$CONF" ]; then
     for V in IP PORTA UTENTE CHIAVE_SSH; do
         case $V in IP) X="$IP";; PORTA) X="$PORTA";; UTENTE) X="$UTENTE";; CHIAVE_SSH) X="$CHIAVE";; esac
         if grep -q "^$V=" "$CONF"; then
-            sed -i -E "s|^$V=[^[:space:]#]*|$V=$X|" "$CONF"
+            sed -i -r "s|^$V=[^[:space:]#]*|$V=$X|" "$CONF"
         else
             echo "$V=$X" >> "$CONF"
         fi
@@ -90,7 +107,7 @@ if [ -f "$CONF" ]; then
 fi
 echo ""
 echo "Fatto. Ora lancia: $D/backup-disco.sh (meglio dentro tmux)"
-FINE_ALLA_ROZZA_1793792394
+FINE_ALLA_ROZZA_1793792974
 chmod 700 "$D/chiavi.sh"
 bash -n "$D/chiavi.sh" && echo "OK: $D/chiavi.sh" || echo "ERRORE: chiavi.sh incollato male, ricopia"
 unset D

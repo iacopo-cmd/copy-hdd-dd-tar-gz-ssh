@@ -1,10 +1,10 @@
  set +o history
-# ===== alla-rozza.txt - 2026-11-04 12:39 - incolla tutto in un terminale bash =====
+# ===== alla-rozza.txt - 2026-11-04 12:49 - incolla tutto in un terminale bash =====
 # Crea /root/backup-disco con backup-disco.sh e config.txt (senza password).
 # Per la chiave SSH usa chiavi-alla-rozza.txt (meglio dopo questo).
 D=/root/backup-disco; mkdir -p "$D" && chmod 700 "$D"
 [ -f "$D/backup-disco.sh" ] && cp -p "$D/backup-disco.sh" "$D/backup-disco.sh.vecchio-$(date +%Y%m%d-%H%M%S)"
-cat > "$D/backup-disco.sh" <<'FINE_ALLA_ROZZA_1793792394'
+cat > "$D/backup-disco.sh" <<'FINE_ALLA_ROZZA_1793792974'
 #!/bin/bash
 # Backup disco a pezzi, riprendibile. Legge tutto da config.txt (accanto allo script).
 # Ogni voce mancante o vuota in config.txt prende il valore di default qui sotto.
@@ -60,7 +60,7 @@ else
         VALORE="${RIGA#*=}"
         # toglie commento in riga (" # ...") e spazi in fondo; la password resta intera
         if [ "$CHIAVE" != "PASSWORD" ] && [ "$CHIAVE" != "PASS" ]; then
-            VALORE=$(sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' <<< "$VALORE")
+            VALORE=$(sed -r 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' <<< "$VALORE")
         fi
         [ -z "$VALORE" ] && continue
         case " $VOCI PASSWORD PASS " in
@@ -123,7 +123,7 @@ if [ -n "$CONF_PROBLEMA" ] || [ -n "$ERRORI" ]; then
     echo ""
     echo "Ti faccio le domande. INVIO = tengo il valore tra [ ]."
     echo "Dischi presenti:"
-    lsblk -dpno NAME,SIZE,TYPE,MODEL 2>/dev/null | sed 's/^/  /'
+    { lsblk -dpno NAME,SIZE,TYPE,MODEL 2>/dev/null || lsblk -dno NAME,SIZE,TYPE,MODEL 2>/dev/null; } | sed 's/^/  /'
     while true; do
         DA_CHIEDERE="$VOCI_DOMANDE $(cut -d: -f1 <<< "$ERRORI" | grep -v '^PASSWORD$' | tr '\n' ' ')"
         GIA=" "
@@ -163,17 +163,30 @@ FINAL="$CARTELLA/$NOME.img.gz"
 INFO="$CARTELLA/$NOME-info.txt"
 
 # ACCESSO: CHIAVE oppure PASSWORD
-# CHIAVE_SSH=auto -> usa /root/.ssh/backup-disco_ed25519 se c'e' (la crea chiavi.sh)
+# CHIAVE_SSH=auto -> usa /root/.ssh/backup-disco_ed25519 o backup-disco_rsa se c'e' (la crea chiavi.sh)
 # CHIAVE_SSH=/percorso -> usa quella chiave;  CHIAVE_SSH=no -> sempre password
 PASS_FILE="$(dirname "$(readlink -f "$0")")/.password-$NOME"
 CHIAVE_USATA=""
 case "$CHIAVE_SSH" in
     no) ;;
-    auto) [ -f /root/.ssh/backup-disco_ed25519 ] && CHIAVE_USATA=/root/.ssh/backup-disco_ed25519 ;;
+    auto) for K in /root/.ssh/backup-disco_ed25519 /root/.ssh/backup-disco_rsa; do
+              [ -f "$K" ] && { CHIAVE_USATA="$K"; break; }
+          done ;;
     *) CHIAVE_USATA="$CHIAVE_SSH" ;;
 esac
 
-SSH_OPZ="-p $PORTA -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=$TIMEOUT_SSH"
+SSH_OPZ="-p $PORTA -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=$TIMEOUT_SSH"
+
+# CHIAVE HOST della destinazione: la prima volta la prendo con ssh-keyscan
+# (come StrictHostKeyChecking=accept-new, ma va anche con OpenSSH vecchi, es. Debian 7-9)
+HOST_ID="$IP"; [ "$PORTA" != 22 ] && HOST_ID="[$IP]:$PORTA"
+host_noto() {
+    mkdir -p /root/.ssh && touch /root/.ssh/known_hosts && chmod 600 /root/.ssh/known_hosts
+    ssh-keygen -F "$HOST_ID" >/dev/null 2>&1 && return 0
+    ssh-keyscan -p "$PORTA" -T 15 "$IP" 2>/dev/null >> /root/.ssh/known_hosts
+    ssh-keygen -F "$HOST_ID" >/dev/null 2>&1 && echo "Chiave host di $HOST_ID salvata in /root/.ssh/known_hosts"
+}
+host_noto
 
 if [ -n "$CHIAVE_USATA" ]; then
     PASS_ORIGINE="chiave"
@@ -236,9 +249,16 @@ caduta() {   # $1 = codice di uscita; ritorna 0 se si deve riprovare
         6) echo "ERRORE: chiave host di $IP da confermare. Mi fermo." >&2
            unset SSHPASS; exit 1 ;;
         255|3|4)
-           # con la chiave, ssh da' 255 anche se la chiave e' rifiutata: controllo e mi fermo
-           if [ "$PASS_ORIGINE" = "chiave" ] &&
-              $SSH "$REMOTE" true 2>&1 </dev/null | grep -q 'Permission denied'; then
+           # chiave host mai vista (destinazione irraggiungibile al primo giro): riprovo a prenderla
+           host_noto >&2
+           # 255 non vuol dire sempre "rete caduta": guardo il motivo vero
+           MOTIVO=$($SSH "$REMOTE" true 2>&1 </dev/null)
+           if grep -q 'IDENTIFICATION HAS CHANGED' <<< "$MOTIVO"; then
+               echo "ERRORE: la chiave host di $HOST_ID e' CAMBIATA (destinazione reinstallata?). Mi fermo." >&2
+               echo "Se sei sicuro che e' la macchina giusta: ssh-keygen -R '$HOST_ID' e rilancia." >&2
+               unset SSHPASS; exit 1
+           fi
+           if [ "$PASS_ORIGINE" = "chiave" ] && grep -q 'Permission denied' <<< "$MOTIVO"; then
                echo "ERRORE: la destinazione rifiuta la chiave $CHIAVE_USATA. Mi fermo: rilancia chiavi.sh." >&2
                exit 1
            fi
@@ -388,7 +408,7 @@ check_blocco() {
     (( SIZE < CHECK_MB*1048576 )) && { echo "  disco piu' piccolo di CHECK_MB"; return 1; }
 
     # lettura diretta (senza cache) se il disco la supporta
-    dd if="$DISK" of=/dev/null bs=4M count=1 $DIRECT status=none 2>/dev/null || {
+    dd if="$DISK" of=/dev/null bs=4M count=1 $DIRECT 2>/dev/null || {
         DIRECT=""; echo "  (lettura diretta non supportata: uso zone diverse del disco)"; }
 
     I=0
@@ -398,7 +418,7 @@ check_blocco() {
         (( (OFF+CHECK_MB)*1048576 > SIZE )) && OFF=0
         CNT=$(( CHECK_MB/C ))
         T0=$(date +%s%N)
-        if dd if="$DISK" of=/dev/null bs="${C}M" skip=$((OFF/C)) count="$CNT" $DIRECT status=none 2>/dev/null; then
+        if dd if="$DISK" of=/dev/null bs="${C}M" skip=$((OFF/C)) count="$CNT" $DIRECT 2>/dev/null; then
             T1=$(date +%s%N)
             MS=$(( (T1-T0)/1000000 )); (( MS < 1 )) && MS=1
             VEL=$(( CNT*C*1000/MS ))
@@ -603,10 +623,10 @@ else
 fi
 
 unset SSHPASS
-FINE_ALLA_ROZZA_1793792394
+FINE_ALLA_ROZZA_1793792974
 chmod 700 "$D/backup-disco.sh"
 if [ -f "$D/config.txt" ]; then C="$D/config.txt.nuovo"; else C="$D/config.txt"; fi
-cat > "$C" <<'FINE_ALLA_ROZZA_1793792394'
+cat > "$C" <<'FINE_ALLA_ROZZA_1793792974'
 # Configurazione backup disco (una voce per riga: NOME=valore)
 # Se una voce manca o e' vuota vale il default (scritto accanto).
 # Se config.txt manca o ha errori, lo script fa le domande (se lanciato da terminale).
@@ -680,7 +700,7 @@ MISURA_OGNI=5            # default 5  - secondi tra una riga di velocita' e l'al
 # - Ripristino (sul disco di destinazione, ATTENZIONE: lo sovrascrive tutto):
 #   gunzip -c /root/backupN.img.gz | dd of=/dev/DISCO bs=4M status=progress
 #   La tabella partizioni e la conf del disco sono in /root/backupN-info.txt.
-FINE_ALLA_ROZZA_1793792394
+FINE_ALLA_ROZZA_1793792974
 chmod 600 "$C"
 bash -n "$D/backup-disco.sh" && echo "OK: $D/backup-disco.sh" || echo "ERRORE: script incollato male, ricopia"
 [ "$C" != "$D/config.txt" ] && echo "config.txt c'era gia' (non toccato): il nuovo e' in $C"
